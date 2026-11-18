@@ -3,7 +3,7 @@
 from .models import CallEdge, CodeGraph, FileSummary, SymbolNode
 from .scanner import scan_directory
 
-__version__ = "0.2.2"
+__version__ = "0.2.3"
 
 __all__ = [
     "__version__",

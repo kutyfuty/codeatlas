@@ -839,7 +839,7 @@
             <h4>Callers ({selectedCallers.length})</h4>
             <div class="chips">
               {#each selectedCallers as c}
-                <button class="chip in" onclick={() => selectNode(c)}>{c.name}</button>
+                <button class="chip in" title={c.name} onclick={() => selectNode(c)}>{c.name}</button>
               {:else}
                 <span class="muted">None</span>
               {/each}
@@ -849,7 +849,7 @@
             <h4>Calls ({selectedCallees.length})</h4>
             <div class="chips">
               {#each selectedCallees as c}
-                <button class="chip out" onclick={() => selectNode(c)}>{c.name}</button>
+                <button class="chip out" title={c.name} onclick={() => selectNode(c)}>{c.name}</button>
               {:else}
                 <span class="muted">None</span>
               {/each}
@@ -1024,7 +1024,9 @@
     background: #0b1120;
     border-right: 1px solid #1e293b;
     padding: 0.75rem;
+    min-width: 0;
     overflow-y: auto;
+    overflow-x: hidden;
   }
 
   .inspector {
@@ -1137,6 +1139,7 @@
   .insp-header h2 {
     margin: 0.4rem 0 0.2rem;
     font-size: 1.1rem;
+    overflow-wrap: anywhere;
   }
 
   .file-loc {
@@ -1175,21 +1178,30 @@
 
   .rel-grid {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 0.6rem;
     margin: 1rem 0;
+  }
+
+  .rel-grid > div {
+    min-width: 0;
   }
 
   .chips {
     display: flex;
     flex-wrap: wrap;
     gap: 0.3rem;
+    min-width: 0;
   }
 
   .chip {
     font-size: 0.75rem;
     padding: 0.2rem 0.45rem;
     border-radius: 4px;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .chip.in {

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import threading
 import urllib.error
 import urllib.request
@@ -267,3 +270,20 @@ def test_server_api_graph_and_file_security(tmp_path: Path) -> None:
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_python_m_codeatlas_entrypoint(tmp_path: Path) -> None:
+    repo = _build_sample_repo(tmp_path)
+    src_dir = str(Path(__file__).resolve().parents[1] / "src")
+    env = os.environ.copy()
+    env["PYTHONPATH"] = src_dir + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    proc = subprocess.run(
+        [sys.executable, "-m", "codeatlas", "scan", str(repo)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "CodeAtlas v" in proc.stdout
+    assert "Files: 2" in proc.stdout
+
