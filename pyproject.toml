@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "codeatlas"
+name = "codeatlas-viz"
 version = "0.2.1"
 description = "Zero-config local codebase architecture & call-graph visualizer with an interactive Svelte UI."
 readme = "README.md"
@@ -26,6 +26,11 @@ classifiers = [
     "Topic :: Software Development :: Documentation",
 ]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/kutyfuty/codeatlas"
+Repository = "https://github.com/kutyfuty/codeatlas"
+Issues = "https://github.com/kutyfuty/codeatlas/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]

@@ -56,6 +56,12 @@ flowchart LR
 ## Installation
 
 ```bash
+# Run directly with pipx / uvx (once published to PyPI)
+pipx install codeatlas-viz
+
+# Or install from source
+git clone https://github.com/kutyfuty/codeatlas.git
+cd codeatlas
 pip install -e .
 ```
 
