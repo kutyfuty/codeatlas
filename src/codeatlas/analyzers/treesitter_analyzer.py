@@ -94,8 +94,10 @@ def _node_text(node: Any, source_bytes: bytes) -> str:
     return source_bytes[node.start_byte : node.end_byte].decode("utf-8", errors="replace")
 
 
-def _find_first_identifier(node: Any, source_bytes: bytes) -> str | None:
+def _find_first_identifier(node: Any, source_bytes: bytes, depth: int = 0) -> str | None:
     """Extract primary identifier name from declaration headers without walking deep bodies."""
+    if depth > 6:
+        return None
     if node.type in {"identifier", "field_identifier", "type_identifier", "property_identifier"}:
         return _node_text(node, source_bytes)
     for child in node.children:
@@ -107,7 +109,7 @@ def _find_first_identifier(node: Any, source_bytes: bytes) -> str | None:
                 return txt.split("::")[-1]
         if child.type in {"identifier", "field_identifier", "type_identifier", "property_identifier"}:
             return _node_text(child, source_bytes)
-        nested = _find_first_identifier(child, source_bytes)
+        nested = _find_first_identifier(child, source_bytes, depth + 1)
         if nested:
             return nested
     return None
@@ -170,9 +172,21 @@ def analyze_with_treesitter(source: str, rel_path: str, language: str) -> Parsed
         seen_ids.add(alt)
         return alt
 
-    def walk(node: Any, class_stack: list[str], func_stack: list[str]) -> None:
-        ntype = node.type
+    class_stack: list[str] = []
+    func_stack: list[str] = []
+    # Stack items: (action, node) where 0 = enter, 1 = exit class, 2 = exit func
+    stack: list[tuple[int, Any]] = [(0, tree.root_node)]
 
+    while stack:
+        action, node = stack.pop()
+        if action == 1:
+            class_stack.pop()
+            continue
+        if action == 2:
+            func_stack.pop()
+            continue
+
+        ntype = node.type
         if ntype in _IMPORT_NODE_TYPES:
             txt = _node_text(node, source_bytes).strip()
             extracted = ""
@@ -212,10 +226,10 @@ def analyze_with_treesitter(source: str, rel_path: str, language: str) -> Parsed
                     )
                 )
                 class_stack.append(name)
-                for child in node.children:
-                    walk(child, class_stack, func_stack)
-                class_stack.pop()
-                return
+                stack.append((1, None))
+                for child in reversed(node.children):
+                    stack.append((0, child))
+                continue
 
         if ntype in _FUNC_NODE_TYPES:
             name = None
@@ -247,18 +261,17 @@ def analyze_with_treesitter(source: str, rel_path: str, language: str) -> Parsed
                 )
                 raw_calls.setdefault(sym_id, [])
                 func_stack.append(sym_id)
-                for child in node.children:
-                    walk(child, class_stack, func_stack)
-                func_stack.pop()
-                return
+                stack.append((2, None))
+                for child in reversed(node.children):
+                    stack.append((0, child))
+                continue
 
         if ntype in _CALL_NODE_TYPES and func_stack:
             target = _extract_call_target(node, source_bytes)
             if target and target not in _IGNORED_CALL_NAMES:
                 raw_calls[func_stack[-1]].append(target)
 
-        for child in node.children:
-            walk(child, class_stack, func_stack)
+        for child in reversed(node.children):
+            stack.append((0, child))
 
-    walk(tree.root_node, [], [])
     return ParsedFile(symbols=symbols, raw_calls=raw_calls, imports=imports)

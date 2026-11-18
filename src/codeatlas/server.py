@@ -119,7 +119,11 @@ class _AtlasHandler(BaseHTTPRequestHandler):
     def _handle_check(self, qs: dict[str, list[str]]) -> None:
         with self.state.lock:
             graph = self.state.graph
-        cfg = load_config(self.state.root)
+        try:
+            cfg = load_config(self.state.root)
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
         if qs.get("max_cycles"):
             try:
                 cfg.max_cycles = int(qs["max_cycles"][0])

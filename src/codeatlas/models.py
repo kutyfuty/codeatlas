@@ -132,7 +132,7 @@ class CodeGraph:
             for node in (src, tgt):
                 if node.id not in emitted:
                     emitted.add(node.id)
-                    label = f"{node.name} ({node.file})".replace('"', "'")
+                    label = f"{node.name} ({node.file})".replace('"', "'").replace("\n", " ").replace("\r", "")
                     lines.append(f'    {safe_id(node.id)}["{label}"]')
             lines.append(f"    {safe_id(src.id)} --> {safe_id(tgt.id)}")
 

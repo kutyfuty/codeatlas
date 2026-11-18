@@ -99,22 +99,31 @@ def parse_rule_spec(spec: str) -> AtlasRule:
 
 def load_config(root: Path, config_path: Path | None = None) -> AtlasConfig:
     """Load `.codeatlas.toml` from project root if present."""
-    cfg_file = config_path if config_path is not None else (root / ".codeatlas.toml")
+    base_dir = root if root.is_dir() else root.parent
+    cfg_file = config_path if config_path is not None else (base_dir / ".codeatlas.toml")
     if config_path is not None and not cfg_file.is_file():
         raise FileNotFoundError(f"Config file not found: {cfg_file}")
     if not cfg_file.is_file():
         return AtlasConfig()
 
-    raw_text = cfg_file.read_text(encoding="utf-8")
-    parsed: dict[str, Any]
-    if _tomllib is not None:
-        parsed = _tomllib.loads(raw_text)
-    else:
-        parsed = _parse_toml_fallback(raw_text)
+    try:
+        raw_text = cfg_file.read_text(encoding="utf-8")
+        if _tomllib is not None:
+            parsed = _tomllib.loads(raw_text)
+        else:
+            parsed = _parse_toml_fallback(raw_text)
+    except Exception as exc:
+        raise ValueError(f"Invalid TOML config in {cfg_file}: {exc}") from exc
 
     chk = parsed.get("check") or {}
+    if not isinstance(chk, dict):
+        raise ValueError(f"Invalid [check] section in {cfg_file}")
+
     rules: list[AtlasRule] = []
-    for idx, r in enumerate(parsed.get("rules") or [], start=1):
+    raw_rules = parsed.get("rules") or []
+    if not isinstance(raw_rules, list):
+        raise ValueError(f"Invalid [[rules]] section in {cfg_file}")
+    for idx, r in enumerate(raw_rules, start=1):
         if not isinstance(r, dict):
             continue
         src = str(r.get("from", "")).strip()
@@ -128,13 +137,16 @@ def load_config(root: Path, config_path: Path | None = None) -> AtlasConfig:
                 )
             )
 
-    raw_dead = chk.get("max_dead_ratio")
-    return AtlasConfig(
-        max_cycles=int(chk.get("max_cycles", 0)),
-        min_health=int(chk.get("min_health", 0)),
-        max_dead_ratio=float(raw_dead) if raw_dead is not None else None,
-        rules=rules,
-    )
+    try:
+        raw_dead = chk.get("max_dead_ratio")
+        return AtlasConfig(
+            max_cycles=int(chk.get("max_cycles", 0)),
+            min_health=int(chk.get("min_health", 0)),
+            max_dead_ratio=float(raw_dead) if raw_dead is not None else None,
+            rules=rules,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid numeric threshold in {cfg_file}: {exc}") from exc
 
 
 def _match_glob(path: str, pattern: str) -> bool:
@@ -226,9 +238,10 @@ def evaluate_check(graph: CodeGraph, config: AtlasConfig) -> dict[str, Any]:
 
 
 def _run_git(root: Path, args: list[str]) -> tuple[int, str]:
+    target_dir = root if root.is_dir() else root.parent
     try:
         proc = subprocess.run(
-            ["git", "-C", str(root), *args],
+            ["git", "-C", str(target_dir), "-c", "core.quotePath=false", *args],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -313,6 +326,9 @@ def resolve_symbols(graph: CodeGraph, query: str) -> list[SymbolNode]:
     if by_name:
         return by_name
     q_lower = q.lower()
+    by_ci_name = [n for n in graph.nodes if n.name.lower() == q_lower]
+    if by_ci_name:
+        return by_ci_name
     return [n for n in graph.nodes if q_lower in n.id.lower()]
 
 

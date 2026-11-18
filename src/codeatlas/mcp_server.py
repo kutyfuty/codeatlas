@@ -204,11 +204,18 @@ class CodeAtlasMCPServer:
 
         raise KeyError(f"Unknown tool: {name}")
 
-    def handle_message(self, msg: dict[str, Any]) -> dict[str, Any] | None:
+    def handle_message(self, msg: Any) -> dict[str, Any] | None:
         """Process one JSON-RPC 2.0 request or notification."""
+        if not isinstance(msg, dict):
+            return {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32600, "message": "Invalid Request: expected JSON object"},
+            }
         method = msg.get("method", "")
         msg_id = msg.get("id")
-        params = msg.get("params") or {}
+        raw_params = msg.get("params")
+        params = raw_params if isinstance(raw_params, dict) else {}
 
         # Notifications do not carry `id` and expect no JSON-RPC response.
         if msg_id is None:
@@ -281,6 +288,8 @@ def _read_message(stream: Any) -> tuple[dict[str, Any] | None, bool]:
                 continue
             if stripped_b.lower().startswith(b"content-length:"):
                 length = int(stripped_b.split(b":", 1)[1].strip())
+                if length < 0:
+                    raise ValueError("Negative Content-Length")
                 while True:
                     hdr = raw_bin.readline()
                     if hdr in (b"", b"\n", b"\r\n"):
@@ -301,6 +310,8 @@ def _read_message(stream: Any) -> tuple[dict[str, Any] | None, bool]:
 
         if stripped.lower().startswith("content-length:"):
             length = int(stripped.split(":", 1)[1].strip())
+            if length < 0:
+                raise ValueError("Negative Content-Length")
             while True:
                 hdr = stream.readline()
                 if hdr in ("", "\n", "\r\n"):

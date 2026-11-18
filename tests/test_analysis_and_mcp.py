@@ -266,3 +266,85 @@ def test_treesitter_ast_walk_with_fake_backend(monkeypatch) -> None:
     assert parsed.imports == ["./util"]
     assert [s.name for s in parsed.symbols] == ["greet"]
     assert parsed.raw_calls["src/app.js::greet"] == ["helper"]
+
+
+def test_config_errors_trailing_slash_multisource_and_mcp_guards(tmp_path: Path) -> None:
+    # 1. Trailing slash rule + file root config loading + bad TOML value error
+    (tmp_path / "ui").mkdir()
+    (tmp_path / "db").mkdir()
+    (tmp_path / "db" / "db.py").write_text("def save_row():\n    pass\n", encoding="utf-8")
+    (tmp_path / "ui" / "view.py").write_text(
+        "from db.db import save_row\ndef show():\n    return save_row()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".codeatlas.toml").write_text(
+        '[check]\nmin_health = "not-int"\n',
+        encoding="utf-8",
+    )
+    assert main(["check", str(tmp_path)]) == 1
+
+    # Passing a regular file uses parent directory for config lookup and trailing slash rule works
+    (tmp_path / "solo.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / ".codeatlas.toml").write_text(
+        '[[rules]]\nfrom = "ui/"\nforbid = "db/"\n',
+        encoding="utf-8",
+    )
+    cfg = load_config(tmp_path / "solo.py")
+    assert len(cfg.rules) == 1
+    assert evaluate_check(scan_directory(tmp_path), cfg)["passed"] is False
+
+    # 2. Multi-source BFS finds path even when the first same-named symbol has no path
+    (tmp_path / "a.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text(
+        "from db.db import save_row\ndef helper():\n    return save_row()\n",
+        encoding="utf-8",
+    )
+    graph = scan_directory(tmp_path)
+    p = shortest_path(graph, "helper", "save_row")
+    assert p["found"] is True
+    assert p["path"][0]["file"] == "b.py"
+
+    # 3. MCP server rejects non-dict JSON and negative Content-Length cleanly
+    bad_in = io.StringIO("[1, 2, 3]\nContent-Length: -5\r\n\r\n")
+    bad_out = io.StringIO()
+    assert serve_mcp_stdio(tmp_path, stdin=bad_in, stdout=bad_out) == 0
+    err_objs = [json.loads(ln) for ln in bad_out.getvalue().splitlines() if ln.strip()]
+    assert err_objs[0]["error"]["code"] == -32600
+    assert err_objs[1]["error"]["code"] == -32700
+
+
+def test_treesitter_deep_iterative_walk_no_recursion_error(monkeypatch) -> None:
+    class _Node:
+        def __init__(self, ntype: str, children=None):
+            self.type = ntype
+            self.start_byte = 0
+            self.end_byte = 1
+            self.start_point = (0, 0)
+            self.end_point = (0, 1)
+            self.children = children or []
+            self.parent = None
+
+        def child_by_field_name(self, _name: str):
+            return None
+
+    cur = _Node("block")
+    for _ in range(1800):
+        parent = _Node("block", [cur])
+        cur.parent = parent
+        cur = parent
+    root = _Node("program", [cur])
+
+    class _Tree:
+        root_node = root
+
+    class _Parser:
+        def parse(self, _b):
+            return _Tree()
+
+    monkeypatch.setattr(
+        "codeatlas.analyzers.treesitter_analyzer._load_ts_backend",
+        lambda: (object(), lambda _lang: _Parser()),
+    )
+    parsed = analyze_with_treesitter("x", "deep.js", "javascript")
+    assert parsed is not None
+

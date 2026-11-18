@@ -532,6 +532,31 @@
     return s;
   });
 
+  let pathOptions = $derived.by(() => {
+    if (!selectedId) return [];
+    const reachable = new Set();
+    const q = [selectedId];
+    let head = 0;
+    while (head < q.length && reachable.size < 200) {
+      const cur = q[head++];
+      for (const nxt of adjMaps.outMap.get(cur) || []) {
+        if (nxt !== selectedId && !reachable.has(nxt)) {
+          reachable.add(nxt);
+          q.push(nxt);
+        }
+      }
+    }
+    const items = [...reachable].map((id) => adjMaps.nodeMap.get(id)).filter(Boolean);
+    if (items.length < 250) {
+      const topRest = [...activeData.nodes]
+        .filter((n) => n.id !== selectedId && !reachable.has(n.id))
+        .sort((a, b) => (b.fan_in + b.fan_out) - (a.fan_in + a.fan_out))
+        .slice(0, 250 - items.length);
+      items.push(...topRest);
+    }
+    return items;
+  });
+
   let cycleNodeSet = $derived(new Set(highlightedCycle || []));
 
   function resetView() {
@@ -540,6 +565,7 @@
     focusOnly = false;
     highlightedCycle = null;
     impactData = null;
+    if (sidebarTab === 'impact') sidebarTab = 'hubs';
     fitToView(visibleNodes);
   }
 
@@ -1114,10 +1140,8 @@
           <h4>Path Finder</h4>
           <select bind:value={pathTargetId} class="full-sel">
             <option value="">Select target to trace path...</option>
-            {#each activeData.nodes as n}
-              {#if n.id !== selectedId}
-                <option value={n.id}>{n.name} ({n.file.split('/').pop()})</option>
-              {/if}
+            {#each pathOptions as n}
+              <option value={n.id}>{n.name} ({n.file.split('/').pop()})</option>
             {/each}
           </select>
           {#if shortestPath && shortestPath.length > 0}
