@@ -1,0 +1,181 @@
+"""Local HTTP server for the CodeAtlas interactive Svelte UI and JSON API."""
+
+from __future__ import annotations
+
+import json
+import mimetypes
+import threading
+import webbrowser
+from functools import partial
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qs, urlparse
+
+from .models import CodeGraph
+from .scanner import scan_directory
+
+WEB_DIR = Path(__file__).resolve().parent / "web"
+
+
+class _AppState:
+    def __init__(self, root: Path, graph: CodeGraph) -> None:
+        self.root = root.resolve()
+        self.graph = graph
+        self.lock = threading.Lock()
+
+    def rescan(self) -> CodeGraph:
+        fresh = scan_directory(self.root)
+        with self.lock:
+            self.graph = fresh
+        return fresh
+
+
+class _AtlasHandler(BaseHTTPRequestHandler):
+    def __init__(self, *args: Any, state: _AppState, **kwargs: Any) -> None:
+        self.state = state
+        super().__init__(*args, **kwargs)
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+        # Keep terminal output clean; CLI prints startup info.
+        return
+
+    def _send_json(self, payload: Any, status: int = HTTPStatus.OK) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_file_bytes(self, content: bytes, content_type: str, status: int = HTTPStatus.OK) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        route = parsed.path
+
+        if route == "/api/health":
+            self._send_json({"status": "ok"})
+            return
+
+        if route == "/api/graph":
+            qs = parse_qs(parsed.query)
+            if qs.get("rescan") == ["1"]:
+                graph = self.state.rescan()
+            else:
+                with self.state.lock:
+                    graph = self.state.graph
+            self._send_json(graph.to_dict())
+            return
+
+        if route == "/api/file":
+            self._handle_file_snippet(parse_qs(parsed.query))
+            return
+
+        self._serve_static(route)
+
+    def _handle_file_snippet(self, qs: dict[str, list[str]]) -> None:
+        rel = (qs.get("path") or [""])[0]
+        if not rel:
+            self._send_json({"error": "Missing 'path' query parameter"}, HTTPStatus.BAD_REQUEST)
+            return
+
+        target = (self.state.root / rel).resolve()
+        try:
+            target.relative_to(self.state.root)
+        except ValueError:
+            self._send_json({"error": "Access outside project root denied"}, HTTPStatus.FORBIDDEN)
+            return
+
+        if not target.is_file():
+            self._send_json({"error": "File not found"}, HTTPStatus.NOT_FOUND)
+            return
+
+        try:
+            all_lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError as exc:
+            self._send_json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        total = len(all_lines)
+        try:
+            start = max(1, int((qs.get("start") or ["1"])[0]))
+            end = min(total, int((qs.get("end") or [str(total)])[0]))
+        except ValueError:
+            self._send_json({"error": "Invalid line range"}, HTTPStatus.BAD_REQUEST)
+            return
+
+        snippet = "\n".join(all_lines[start - 1 : end]) if total > 0 and start <= end else ""
+        self._send_json({
+            "path": rel,
+            "start_line": start,
+            "end_line": end,
+            "total_lines": total,
+            "content": snippet,
+        })
+
+    def _serve_static(self, route: str) -> None:
+        if not WEB_DIR.is_dir():
+            msg = b"<h1>CodeAtlas Web UI not built</h1><p>Run npm run build in frontend/.</p>"
+            self._send_file_bytes(msg, "text/html; charset=utf-8", HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+
+        rel = route.lstrip("/") or "index.html"
+        candidate = (WEB_DIR / rel).resolve()
+        try:
+            candidate.relative_to(WEB_DIR.resolve())
+        except ValueError:
+            self._send_json({"error": "Forbidden"}, HTTPStatus.FORBIDDEN)
+            return
+
+        if not candidate.is_file():
+            # Return 404 for missing asset files; only use SPA fallback for extensionless routes.
+            if rel.startswith("assets/") or Path(rel).suffix:
+                self._send_json({"error": "Asset not found"}, HTTPStatus.NOT_FOUND)
+                return
+            candidate = WEB_DIR / "index.html"
+
+        mime, _ = mimetypes.guess_type(str(candidate))
+        content_type = mime or "application/octet-stream"
+        if content_type.startswith("text/") or content_type in ("application/javascript", "application/json"):
+            content_type += "; charset=utf-8"
+
+        self._send_file_bytes(candidate.read_bytes(), content_type)
+
+
+def create_server(root: Path, graph: CodeGraph, host: str = "127.0.0.1", port: int = 4173) -> ThreadingHTTPServer:
+    """Create a configured ThreadingHTTPServer without starting its loop."""
+    state = _AppState(root=root, graph=graph)
+    handler = partial(_AtlasHandler, state=state)
+    server = ThreadingHTTPServer((host, port), handler)
+    server.daemon_threads = True
+    return server
+
+
+def serve_graph(
+    root: Path,
+    graph: CodeGraph,
+    host: str = "127.0.0.1",
+    port: int = 4173,
+    open_browser: bool = True,
+) -> None:
+    """Start the local CodeAtlas server and block until Ctrl+C."""
+    server = create_server(root, graph, host=host, port=port)
+    actual_port = server.server_address[1]
+    url = f"http://{host}:{actual_port}"
+    print(f"CodeAtlas UI running at {url}  (Press Ctrl+C to stop)")
+    if open_browser:
+        threading.Timer(0.4, lambda: webbrowser.open(url)).start()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nShutting down CodeAtlas server.")
+    finally:
+        server.server_close()
