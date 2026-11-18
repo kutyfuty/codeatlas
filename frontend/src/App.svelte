@@ -5,14 +5,17 @@
   let loading = $state(true);
   let error = $state('');
 
-  let viewMode = $state('symbols'); // 'symbols' | 'files'
-  let sidebarTab = $state('hubs'); // 'hubs' | 'cycles' | 'dead'
+  let viewMode = $state('symbols'); // 'symbols' | 'files' | 'folders'
+  let sidebarTab = $state('hubs'); // 'hubs' | 'cycles' | 'dead' | 'impact'
   let search = $state('');
   let langFilter = $state('all');
   let focusOnly = $state(false);
   let selectedId = $state(null);
   let pathTargetId = $state('');
   let highlightedCycle = $state(null);
+
+  let impactData = $state(null);
+  let impactLoading = $state(false);
 
   let snippet = $state(null);
   let snippetLoading = $state(false);
@@ -50,6 +53,7 @@
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       graph = data;
+      impactData = null;
       recomputeLayout();
       if (selectedId && !data.nodes.some((n) => n.id === selectedId)) {
         selectedId = null;
@@ -84,10 +88,107 @@
     return { nodes, edges: data.file_edges || [] };
   }
 
+  async function loadImpact(opts = {}) {
+    if (!graph) return;
+    impactLoading = true;
+    try {
+      const params = new URLSearchParams();
+      if (opts.file) {
+        params.set('file', opts.file);
+        params.set('git', '0');
+      } else if (opts.symbol) {
+        params.set('symbol', opts.symbol);
+        params.set('git', '0');
+      } else {
+        params.set('git', '1');
+      }
+      const res = await fetch(`/api/impact?${params.toString()}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      impactData = await res.json();
+      sidebarTab = 'impact';
+      if (viewMode === 'folders') {
+        viewMode = 'symbols';
+        recomputeLayout();
+      }
+    } catch {
+      impactData = null;
+    } finally {
+      impactLoading = false;
+    }
+  }
+
+  function folderOf(filePath) {
+    const idx = filePath.lastIndexOf('/');
+    return idx === -1 ? '(root)' : filePath.slice(0, idx);
+  }
+
+  function buildFolderNodesAndEdges(data) {
+    const groups = new Map();
+    for (const f of data.files) {
+      const dir = folderOf(f.path);
+      let g = groups.get(dir);
+      if (!g) {
+        g = {
+          id: dir,
+          name: dir,
+          kind: 'folder',
+          file: f.path,
+          fileCount: 0,
+          symbolCount: 0,
+          langCounts: {},
+        };
+        groups.set(dir, g);
+      }
+      g.fileCount += 1;
+      g.symbolCount += f.symbol_count || 0;
+      g.langCounts[f.language] = (g.langCounts[f.language] || 0) + 1;
+    }
+
+    const edgeMap = new Map();
+    const folderIn = {};
+    const folderOut = {};
+    for (const e of data.file_edges || []) {
+      const sf = folderOf(e.source);
+      const tf = folderOf(e.target);
+      if (sf === tf) continue;
+      const key = `${sf}->${tf}`;
+      edgeMap.set(key, (edgeMap.get(key) || 0) + (e.call_count || 1));
+    }
+
+    const edges = [];
+    for (const [key, cnt] of edgeMap.entries()) {
+      const [source, target] = key.split('->');
+      edges.push({ source, target, call_count: cnt });
+      folderOut[source] = (folderOut[source] || 0) + 1;
+      folderIn[target] = (folderIn[target] || 0) + 1;
+    }
+
+    const nodes = [...groups.values()].map((g) => {
+      const domLang = Object.entries(g.langCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || 'python';
+      return {
+        id: g.id,
+        name: g.name,
+        kind: 'folder',
+        file: g.file,
+        language: domLang,
+        start_line: 1,
+        end_line: 1,
+        docstring: `${g.fileCount} files · ${g.symbolCount} symbols`,
+        fan_in: folderIn[g.id] || 0,
+        fan_out: folderOut[g.id] || 0,
+      };
+    });
+
+    return { nodes, edges };
+  }
+
   function recomputeLayout() {
     if (!graph) return;
     if (viewMode === 'files') {
       const { nodes, edges } = buildFileNodesAndEdges(graph);
+      layoutNodes(nodes, edges);
+    } else if (viewMode === 'folders') {
+      const { nodes, edges } = buildFolderNodesAndEdges(graph);
       layoutNodes(nodes, edges);
     } else {
       const sorted = [...graph.nodes].sort(
@@ -142,27 +243,74 @@
     const simNodes = nodes.slice(0, 220);
     const simIds = new Set(simNodes.map((n) => n.id));
     const simEdges = edges.filter((e) => simIds.has(e.source) && simIds.has(e.target));
+    const maxIters = simNodes.length > 140 ? 28 : 42;
+    const cellSize = 340;
+    const useGrid = simNodes.length > 75;
 
-    for (let iter = 0; iter < 45; iter++) {
+    for (let iter = 0; iter < maxIters; iter++) {
       const disp = {};
       for (const n of simNodes) disp[n.id] = { x: 0, y: 0 };
 
-      for (let i = 0; i < simNodes.length; i++) {
-        for (let j = i + 1; j < simNodes.length; j++) {
-          const a = simNodes[i].id;
-          const b = simNodes[j].id;
-          const dx = pos[a].x - pos[b].x;
-          const dy = pos[a].y - pos[b].y;
-          const dist2 = dx * dx + dy * dy + 0.01;
-          if (dist2 < 110000) {
-            const dist = Math.sqrt(dist2);
-            const force = 4400 / dist2;
-            const fx = (dx / dist) * force * 18;
-            const fy = (dy / dist) * force * 18;
-            disp[a].x += fx;
-            disp[a].y += fy;
-            disp[b].x -= fx;
-            disp[b].y -= fy;
+      if (useGrid) {
+        const grid = new Map();
+        for (const n of simNodes) {
+          const p = pos[n.id];
+          const cx = Math.floor(p.x / cellSize);
+          const cy = Math.floor(p.y / cellSize);
+          const key = `${cx},${cy}`;
+          let bucket = grid.get(key);
+          if (!bucket) {
+            bucket = [];
+            grid.set(key, bucket);
+          }
+          bucket.push(n.id);
+        }
+        for (const n of simNodes) {
+          const a = n.id;
+          const pa = pos[a];
+          const cx = Math.floor(pa.x / cellSize);
+          const cy = Math.floor(pa.y / cellSize);
+          for (let ox = -1; ox <= 1; ox++) {
+            for (let oy = -1; oy <= 1; oy++) {
+              const bucket = grid.get(`${cx + ox},${cy + oy}`);
+              if (!bucket) continue;
+              for (const b of bucket) {
+                if (a >= b) continue;
+                const dx = pa.x - pos[b].x;
+                const dy = pa.y - pos[b].y;
+                const dist2 = dx * dx + dy * dy + 0.01;
+                if (dist2 < 110000) {
+                  const dist = Math.sqrt(dist2);
+                  const force = 4400 / dist2;
+                  const fx = (dx / dist) * force * 18;
+                  const fy = (dy / dist) * force * 18;
+                  disp[a].x += fx;
+                  disp[a].y += fy;
+                  disp[b].x -= fx;
+                  disp[b].y -= fy;
+                }
+              }
+            }
+          }
+        }
+      } else {
+        for (let i = 0; i < simNodes.length; i++) {
+          for (let j = i + 1; j < simNodes.length; j++) {
+            const a = simNodes[i].id;
+            const b = simNodes[j].id;
+            const dx = pos[a].x - pos[b].x;
+            const dy = pos[a].y - pos[b].y;
+            const dist2 = dx * dx + dy * dy + 0.01;
+            if (dist2 < 110000) {
+              const dist = Math.sqrt(dist2);
+              const force = 4400 / dist2;
+              const fx = (dx / dist) * force * 18;
+              const fy = (dy / dist) * force * 18;
+              disp[a].x += fx;
+              disp[a].y += fy;
+              disp[b].x -= fx;
+              disp[b].y -= fy;
+            }
           }
         }
       }
@@ -180,10 +328,16 @@
         disp[e.target].y -= fy;
       }
 
+      let maxStep = 0;
       for (const n of simNodes) {
-        pos[n.id].x += Math.max(-24, Math.min(24, disp[n.id].x));
-        pos[n.id].y += Math.max(-24, Math.min(24, disp[n.id].y));
+        const sx = Math.max(-24, Math.min(24, disp[n.id].x));
+        const sy = Math.max(-24, Math.min(24, disp[n.id].y));
+        pos[n.id].x += sx;
+        pos[n.id].y += sy;
+        const step = Math.abs(sx) + Math.abs(sy);
+        if (step > maxStep) maxStep = step;
       }
+      if (maxStep < 0.8) break;
     }
 
     positions = pos;
@@ -194,8 +348,12 @@
     selectedId = node.id;
     pathTargetId = '';
     highlightedCycle = null;
-    snippetLoading = true;
     snippet = null;
+    if (node.kind === 'folder') {
+      snippetLoading = false;
+      return;
+    }
+    snippetLoading = true;
     try {
       const params = new URLSearchParams({
         path: node.file,
@@ -226,7 +384,41 @@
   let activeData = $derived.by(() => {
     if (!graph) return { nodes: [], edges: [] };
     if (viewMode === 'files') return buildFileNodesAndEdges(graph);
+    if (viewMode === 'folders') return buildFolderNodesAndEdges(graph);
     return { nodes: graph.nodes, edges: graph.edges };
+  });
+
+  let adjMaps = $derived.by(() => {
+    const nodeMap = new Map();
+    const outMap = new Map();
+    const inMap = new Map();
+    for (const n of activeData.nodes) {
+      nodeMap.set(n.id, n);
+    }
+    for (const e of activeData.edges) {
+      if (!outMap.has(e.source)) outMap.set(e.source, []);
+      outMap.get(e.source).push(e.target);
+      if (!inMap.has(e.target)) inMap.set(e.target, []);
+      inMap.get(e.target).push(e.source);
+    }
+    return { nodeMap, outMap, inMap };
+  });
+
+  let impactSeedSet = $derived.by(() => {
+    if (!impactData) return new Set();
+    if (viewMode === 'files') return new Set(impactData.changed_files || []);
+    if (viewMode === 'symbols') return new Set((impactData.changed_symbols || []).map((s) => s.id));
+    return new Set();
+  });
+
+  let impactUpstreamSet = $derived.by(() => {
+    if (!impactData) return new Set();
+    if (viewMode === 'files') {
+      const seeds = impactSeedSet;
+      return new Set((impactData.impacted_files || []).filter((f) => !seeds.has(f)));
+    }
+    if (viewMode === 'symbols') return new Set((impactData.impacted_symbols || []).map((s) => s.id));
+    return new Set();
   });
 
   let visibleNodes = $derived.by(() => {
@@ -241,20 +433,24 @@
 
     if (focusOnly && selectedId) {
       const neighborIds = new Set([selectedId]);
-      for (const e of activeData.edges) {
-        if (e.source === selectedId) neighborIds.add(e.target);
-        if (e.target === selectedId) neighborIds.add(e.source);
-      }
+      for (const tgt of adjMaps.outMap.get(selectedId) || []) neighborIds.add(tgt);
+      for (const src of adjMaps.inMap.get(selectedId) || []) neighborIds.add(src);
       base = base.filter((n) => neighborIds.has(n.id));
     }
 
-    // Prioritize highest-connectivity hubs and always keep selected/cycle nodes visible
+    // Prioritize highest-connectivity hubs and always keep selected/cycle/impact nodes visible
     const sorted = [...base]
       .sort((a, b) => (b.fan_in + b.fan_out) - (a.fan_in + a.fan_out));
     const capped = sorted.slice(0, 250);
     const cappedIds = new Set(capped.map((n) => n.id));
     for (const extra of activeData.nodes) {
-      if (!cappedIds.has(extra.id) && (extra.id === selectedId || cycleNodeSet.has(extra.id))) {
+      if (
+        !cappedIds.has(extra.id) &&
+        (extra.id === selectedId ||
+          cycleNodeSet.has(extra.id) ||
+          impactSeedSet.has(extra.id) ||
+          impactUpstreamSet.has(extra.id))
+      ) {
         capped.push(extra);
         cappedIds.add(extra.id);
       }
@@ -269,19 +465,19 @@
   );
 
   let selectedNode = $derived(
-    activeData.nodes.find((n) => n.id === selectedId) ?? null
+    adjMaps.nodeMap.get(selectedId) ?? null
   );
 
   let selectedCallers = $derived.by(() => {
     if (!selectedId) return [];
-    const ids = new Set(activeData.edges.filter((e) => e.target === selectedId).map((e) => e.source));
-    return activeData.nodes.filter((n) => ids.has(n.id));
+    const ids = new Set(adjMaps.inMap.get(selectedId) || []);
+    return [...ids].map((id) => adjMaps.nodeMap.get(id)).filter(Boolean);
   });
 
   let selectedCallees = $derived.by(() => {
     if (!selectedId) return [];
-    const ids = new Set(activeData.edges.filter((e) => e.source === selectedId).map((e) => e.target));
-    return activeData.nodes.filter((n) => ids.has(n.id));
+    const ids = new Set(adjMaps.outMap.get(selectedId) || []);
+    return [...ids].map((id) => adjMaps.nodeMap.get(id)).filter(Boolean);
   });
 
   let deadSymbols = $derived.by(() => {
@@ -293,9 +489,15 @@
 
   let filteredHubs = $derived.by(() => {
     if (!graph) return [];
-    if (langFilter === 'all') return graph.stats.hotspots;
-    return graph.nodes
-      .filter((n) => n.language === langFilter && (n.fan_in + n.fan_out) > 0)
+    if (viewMode === 'symbols') {
+      if (langFilter === 'all') return graph.stats.hotspots;
+      return graph.nodes
+        .filter((n) => n.language === langFilter && (n.fan_in + n.fan_out) > 0)
+        .sort((a, b) => (b.fan_in + b.fan_out) - (a.fan_in + a.fan_out))
+        .slice(0, 10);
+    }
+    return activeData.nodes
+      .filter((n) => langFilter === 'all' || n.language === langFilter)
       .sort((a, b) => (b.fan_in + b.fan_out) - (a.fan_in + a.fan_out))
       .slice(0, 10);
   });
@@ -303,11 +505,6 @@
   // Shortest directed call path from selectedId -> pathTargetId via BFS
   let shortestPath = $derived.by(() => {
     if (!selectedId || !pathTargetId || selectedId === pathTargetId) return null;
-    const adj = new Map();
-    for (const e of activeData.edges) {
-      if (!adj.has(e.source)) adj.set(e.source, []);
-      adj.get(e.source).push(e.target);
-    }
     const queue = [[selectedId]];
     let head = 0;
     const visited = new Set([selectedId]);
@@ -315,7 +512,7 @@
       const path = queue[head++];
       const tail = path[path.length - 1];
       if (tail === pathTargetId) return path;
-      for (const next of adj.get(tail) || []) {
+      for (const next of adjMaps.outMap.get(tail) || []) {
         if (!visited.has(next)) {
           visited.add(next);
           queue.push([...path, next]);
@@ -342,6 +539,7 @@
     langFilter = 'all';
     focusOnly = false;
     highlightedCycle = null;
+    impactData = null;
     fitToView(visibleNodes);
   }
 
@@ -517,6 +715,9 @@
         <button class:seg-active={viewMode === 'files'} onclick={() => switchView('files')}>
           Files
         </button>
+        <button class:seg-active={viewMode === 'folders'} onclick={() => switchView('folders')}>
+          Folders
+        </button>
       </div>
       <input
         type="search"
@@ -544,6 +745,14 @@
         />
         Focus 1-hop
       </label>
+      <button
+        class:impact-btn={Boolean(impactData)}
+        onclick={() => loadImpact({ git: true })}
+        disabled={impactLoading}
+        title="Show git diff blast radius"
+      >
+        {impactLoading ? 'Tracing...' : 'Impact'}
+      </button>
       <button onclick={resetView} title="Reset pan, zoom, and filters">
         Reset
       </button>
@@ -572,11 +781,14 @@
           <button class:tab-active={sidebarTab === 'dead'} onclick={() => (sidebarTab = 'dead')}>
             Dead ({deadSymbols.length})
           </button>
+          <button class:tab-active={sidebarTab === 'impact'} onclick={() => (sidebarTab = 'impact')}>
+            Impact
+          </button>
         </div>
 
         {#if sidebarTab === 'hubs'}
           <section>
-            <h3>Top Hubs</h3>
+            <h3>{viewMode === 'folders' ? 'Folder Clusters' : viewMode === 'files' ? 'Top File Hubs' : 'Top Hubs'}</h3>
             <ul class="list">
               {#each filteredHubs as hub}
                 <li>
@@ -584,8 +796,7 @@
                     class="list-btn"
                     class:active={selectedId === hub.id}
                     onclick={() => {
-                      if (viewMode !== 'symbols') switchView('symbols');
-                      const found = graph.nodes.find((n) => n.id === hub.id);
+                      const found = activeData.nodes.find((n) => n.id === hub.id) || graph.nodes.find((n) => n.id === hub.id);
                       if (found) selectNode(found);
                     }}
                   >
@@ -626,7 +837,7 @@
               {/each}
             </ul>
           </section>
-        {:else}
+        {:else if sidebarTab === 'dead'}
           <section>
             <h3>Unreferenced (fan-in = 0)</h3>
             <ul class="list">
@@ -649,6 +860,58 @@
               {/each}
             </ul>
           </section>
+        {:else}
+          <section>
+            <div class="impact-hdr">
+              <h3>Blast Radius</h3>
+              {#if impactData}
+                <button class="clear-btn" onclick={() => (impactData = null)}>Clear</button>
+              {/if}
+            </div>
+            {#if !impactData}
+              <p class="muted">Click "Impact" in the top bar for git diff, or "Blast Radius" on any node.</p>
+            {:else}
+              <p class="impact-meta">
+                {impactData.source} · {impactData.summary.changed_symbol_count} changed ·
+                {impactData.summary.impacted_symbol_count} upstream ·
+                {impactData.summary.entrypoint_count} entrypoints
+              </p>
+              {#if impactData.affected_entrypoints?.length}
+                <h4>Entrypoints ({impactData.affected_entrypoints.length})</h4>
+                <ul class="list">
+                  {#each impactData.affected_entrypoints.slice(0, 20) as ep}
+                    <li>
+                      <button class="list-btn" onclick={() => {
+                        if (viewMode !== 'symbols') switchView('symbols');
+                        const found = graph.nodes.find((n) => n.id === ep.id);
+                        if (found) selectNode(found);
+                      }}>
+                        <span class="sym-name">{ep.name}</span>
+                        <span class="meta">hop {ep.hop}</span>
+                      </button>
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+              <h4>Upstream Callers ({impactData.impacted_symbols?.length || 0})</h4>
+              <ul class="list">
+                {#each (impactData.impacted_symbols || []).slice(0, 40) as sym}
+                  <li>
+                    <button class="list-btn" onclick={() => {
+                      if (viewMode !== 'symbols') switchView('symbols');
+                      const found = graph.nodes.find((n) => n.id === sym.id);
+                      if (found) selectNode(found);
+                    }}>
+                      <span class="sym-name">{sym.name}</span>
+                      <span class="meta">hop {sym.hop}</span>
+                    </button>
+                  </li>
+                {:else}
+                  <li class="muted">No upstream callers found.</li>
+                {/each}
+              </ul>
+            {/if}
+          </section>
         {/if}
 
         <section>
@@ -663,7 +926,7 @@
                 >
                   <span class="dot" style:background={LANG_COLORS[node.language] || '#94a3b8'}></span>
                   <span class="sym-name">{node.name}</span>
-                  <span class="meta">{node.file.split('/').pop()}</span>
+                  <span class="meta">{node.kind === 'folder' ? node.docstring : node.file.split('/').pop()}</span>
                 </button>
               </li>
             {/each}
@@ -733,6 +996,17 @@
             >
               <path d="M 0 1 L 10 5 L 0 9 z" fill="#f97316" />
             </marker>
+            <marker
+              id="arrow-impact"
+              viewBox="0 0 10 10"
+              refX="18"
+              refY="5"
+              markerWidth="7"
+              markerHeight="7"
+              orient="auto-start-reverse"
+            >
+              <path d="M 0 1 L 10 5 L 0 9 z" fill="#ef4444" />
+            </marker>
           </defs>
 
           <g transform={`translate(${pan.x}, ${pan.y}) scale(${zoom})`}>
@@ -742,16 +1016,17 @@
               {#if a && b}
                 {@const inPath = pathEdgeSet.has(`${edge.source}->${edge.target}`)}
                 {@const inCycle = cycleNodeSet.has(edge.source) && cycleNodeSet.has(edge.target)}
-                {@const active = inPath || inCycle || selectedId === edge.source || selectedId === edge.target}
+                {@const inImpact = (impactSeedSet.has(edge.source) || impactUpstreamSet.has(edge.source)) && (impactSeedSet.has(edge.target) || impactUpstreamSet.has(edge.target))}
+                {@const active = inPath || inCycle || inImpact || selectedId === edge.source || selectedId === edge.target}
                 <line
                   x1={a.x}
                   y1={a.y}
                   x2={b.x}
                   y2={b.y}
-                  stroke={inPath ? '#22c55e' : inCycle ? '#f97316' : active ? '#38bdf8' : '#334155'}
-                  stroke-width={inPath || inCycle ? 2.8 : active ? 2.2 : 1.2}
-                  stroke-opacity={(selectedId || highlightedCycle) && !active ? 0.2 : 0.88}
-                  marker-end={inPath ? 'url(#arrow-path)' : inCycle ? 'url(#arrow-cycle)' : active ? 'url(#arrow-active)' : 'url(#arrow)'}
+                  stroke={inPath ? '#22c55e' : inImpact ? '#ef4444' : inCycle ? '#f97316' : active ? '#38bdf8' : '#334155'}
+                  stroke-width={inPath || inCycle || inImpact ? 2.8 : active ? 2.2 : 1.2}
+                  stroke-opacity={(selectedId || highlightedCycle || impactData) && !active ? 0.18 : 0.88}
+                  marker-end={inPath ? 'url(#arrow-path)' : inImpact ? 'url(#arrow-impact)' : inCycle ? 'url(#arrow-cycle)' : active ? 'url(#arrow-active)' : 'url(#arrow)'}
                 />
               {/if}
             {/each}
@@ -760,6 +1035,8 @@
               {@const p = positions[node.id] || { x: 0, y: 0 }}
               {@const isSel = selectedId === node.id}
               {@const inCycle = cycleNodeSet.has(node.id)}
+              {@const isSeed = impactSeedSet.has(node.id)}
+              {@const isUp = impactUpstreamSet.has(node.id)}
               {@const color = LANG_COLORS[node.language] || '#94a3b8'}
               <g
                 data-node-id={node.id}
@@ -775,9 +1052,9 @@
                 <title>{node.file} :: {node.name} (L{node.start_line}-{node.end_line})</title>
                 <circle
                   r={isSel ? 16 : 11 + Math.min(8, node.fan_in + node.fan_out)}
-                  fill="#0f172a"
-                  stroke={isSel ? '#f8fafc' : inCycle ? '#f97316' : color}
-                  stroke-width={isSel || inCycle ? 3 : 2}
+                  fill={isSeed ? '#450a0a' : isUp ? '#451a03' : '#0f172a'}
+                  stroke={isSel ? '#f8fafc' : isSeed ? '#ef4444' : isUp ? '#f59e0b' : inCycle ? '#f97316' : color}
+                  stroke-width={isSel || inCycle || isSeed || isUp ? 3 : 2}
                 />
                 <text y="26" text-anchor="middle" class="node-label">
                   {node.name.length > 22 ? node.name.slice(0, 20) + '…' : node.name}
@@ -810,6 +1087,25 @@
               }}
             >
               Drill into file symbols →
+            </button>
+          {:else if viewMode === 'folders'}
+            <button
+              class="drill-btn"
+              onclick={() => {
+                const folderPath = selectedNode.id === '(root)' ? '' : selectedNode.id + '/';
+                switchView('files');
+                search = folderPath;
+              }}
+            >
+              Explore folder files →
+            </button>
+          {/if}
+          {#if viewMode !== 'folders'}
+            <button
+              class="drill-btn impact-action"
+              onclick={() => loadImpact(viewMode === 'files' ? { file: selectedNode.file } : { symbol: selectedNode.id })}
+            >
+              Trace Upstream Blast Radius →
             </button>
           {/if}
         </div>
@@ -859,7 +1155,9 @@
 
         <div class="code-box">
           <h4>Source Preview</h4>
-          {#if snippetLoading}
+          {#if selectedNode.kind === 'folder'}
+            <p class="muted">Folder cluster — click "Explore folder files" above to inspect files.</p>
+          {:else if snippetLoading}
             <p class="muted">Loading source...</p>
           {:else if snippet}
             <pre><code>{snippet.content}</code></pre>
@@ -896,8 +1194,8 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 0.75rem;
-    padding: 0.6rem 1rem;
+    gap: 0.5rem;
+    padding: 0.5rem 0.75rem;
     background: #0f172a;
     border-bottom: 1px solid #1e293b;
   }
@@ -905,7 +1203,8 @@
   .brand {
     display: flex;
     align-items: center;
-    gap: 0.6rem;
+    gap: 0.5rem;
+    flex-shrink: 0;
   }
 
   .logo {
@@ -917,7 +1216,7 @@
     display: block;
     font-size: 0.72rem;
     color: #94a3b8;
-    max-width: 220px;
+    max-width: 145px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -925,15 +1224,17 @@
 
   .stats {
     display: flex;
-    gap: 0.5rem;
-    font-size: 0.76rem;
+    gap: 0.35rem;
+    font-size: 0.74rem;
+    flex-shrink: 0;
   }
 
   .stats span {
     background: #1e293b;
-    padding: 0.22rem 0.5rem;
+    padding: 0.2rem 0.45rem;
     border-radius: 999px;
     color: #cbd5e1;
+    white-space: nowrap;
   }
 
   .stats .warn {
@@ -949,8 +1250,9 @@
   .controls {
     display: flex;
     align-items: center;
-    gap: 0.45rem;
-    flex-wrap: wrap;
+    gap: 0.35rem;
+    flex-wrap: nowrap;
+    min-width: 0;
   }
 
   .seg,
@@ -960,6 +1262,7 @@
     border: 1px solid #334155;
     border-radius: 6px;
     overflow: hidden;
+    flex-shrink: 0;
   }
 
   .tabs {
@@ -971,8 +1274,8 @@
     border: none;
     border-radius: 0;
     background: transparent;
-    padding: 0.35rem 0.55rem;
-    font-size: 0.76rem;
+    padding: 0.3rem 0.45rem;
+    font-size: 0.74rem;
   }
 
   .tabs button {
@@ -992,8 +1295,14 @@
     color: #f8fafc;
     border: 1px solid #334155;
     border-radius: 6px;
-    padding: 0.35rem 0.55rem;
-    font-size: 0.8rem;
+    padding: 0.3rem 0.48rem;
+    font-size: 0.76rem;
+    white-space: nowrap;
+  }
+
+  input[type='search'] {
+    width: 145px;
+    min-width: 90px;
   }
 
   button {
@@ -1007,9 +1316,10 @@
   .toggle {
     display: flex;
     align-items: center;
-    gap: 0.3rem;
-    font-size: 0.78rem;
+    gap: 0.25rem;
+    font-size: 0.74rem;
     color: #cbd5e1;
+    white-space: nowrap;
   }
 
   .workspace {
@@ -1234,5 +1544,31 @@
   .muted {
     color: #64748b;
     font-size: 0.78rem;
+  }
+
+  .impact-btn {
+    border-color: #ef4444;
+    color: #fca5a5;
+  }
+
+  .impact-action {
+    color: #fbbf24;
+  }
+
+  .impact-hdr {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .clear-btn {
+    padding: 0.15rem 0.45rem;
+    font-size: 0.7rem;
+  }
+
+  .impact-meta {
+    margin: 0.25rem 0 0.6rem;
+    font-size: 0.75rem;
+    color: #fbbf24;
   }
 </style>

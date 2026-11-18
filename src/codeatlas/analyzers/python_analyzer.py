@@ -17,114 +17,113 @@ def _call_name(node: ast.expr) -> str | None:
     return None
 
 
-class _PythonVisitor(ast.NodeVisitor):
-    """Walks a Python AST tracking the active class and function scope."""
-
-    def __init__(self, rel_path: str) -> None:
-        self.rel_path = rel_path
-        self.symbols: list[SymbolNode] = []
-        self.raw_calls: dict[str, list[str]] = {}
-        self.imports: list[str] = []
-        self.aliases: dict[str, str] = {}
-        self._class_stack: list[str] = []
-        self._scope_names: list[str] = []
-        self._func_stack: list[str] = []
-
-    def _make_id(self, qualified_name: str) -> str:
-        return f"{self.rel_path}::{qualified_name}"
-
-    def visit_Import(self, node: ast.Import) -> None:
-        for alias in node.names:
-            self.imports.append(alias.name)
-            if alias.asname:
-                self.aliases[alias.asname] = alias.name.split(".")[-1]
-
-    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        if node.module:
-            self.imports.append(node.module)
-        for alias in node.names:
-            if not node.module and alias.name != "*":
-                self.imports.append(alias.name)
-            if alias.asname and alias.name != "*":
-                self.aliases[alias.asname] = alias.name
-
-    def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        self._scope_names.append(node.name)
-        qname = ".".join(self._scope_names)
-        sym_id = self._make_id(qname)
-        doc = ast.get_docstring(node) or ""
-        self.symbols.append(
-            SymbolNode(
-                id=sym_id,
-                name=node.name,
-                kind="class",
-                file=self.rel_path,
-                language="python",
-                start_line=node.lineno,
-                end_line=node.end_lineno or node.lineno,
-                docstring=doc.splitlines()[0] if doc else "",
-                parent=self._class_stack[-1] if self._class_stack else None,
-            )
-        )
-        self._class_stack.append(node.name)
-        self.generic_visit(node)
-        self._class_stack.pop()
-        self._scope_names.pop()
-
-    def _visit_func(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
-        in_class_directly = bool(self._class_stack) and not self._func_stack
-        kind = "method" if in_class_directly else "function"
-        parent = self._class_stack[-1] if self._class_stack else None
-
-        self._scope_names.append(node.name)
-        qname = ".".join(self._scope_names)
-        sym_id = self._make_id(qname)
-        doc = ast.get_docstring(node) or ""
-        self.symbols.append(
-            SymbolNode(
-                id=sym_id,
-                name=node.name,
-                kind=kind,
-                file=self.rel_path,
-                language="python",
-                start_line=node.lineno,
-                end_line=node.end_lineno or node.lineno,
-                docstring=doc.splitlines()[0] if doc else "",
-                parent=parent,
-            )
-        )
-        self.raw_calls.setdefault(sym_id, [])
-        self._func_stack.append(sym_id)
-        self.generic_visit(node)
-        self._func_stack.pop()
-        self._scope_names.pop()
-
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        self._visit_func(node)
-
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        self._visit_func(node)
-
-    def visit_Call(self, node: ast.Call) -> None:
-        if self._func_stack:
-            callee = _call_name(node.func)
-            if callee:
-                self.raw_calls[self._func_stack[-1]].append(callee)
-        self.generic_visit(node)
-
-
 def analyze_python(source: str, rel_path: str) -> ParsedFile:
-    """Parse Python source code into symbols and call references."""
+    """Parse Python source code iteratively into symbols and call references."""
     try:
         tree = ast.parse(source, filename=rel_path)
     except SyntaxError:
         return ParsedFile()
 
-    visitor = _PythonVisitor(rel_path)
-    visitor.visit(tree)
+    symbols: list[SymbolNode] = []
+    raw_calls: dict[str, list[str]] = {}
+    imports: list[str] = []
+    aliases: dict[str, str] = {}
+    class_stack: list[str] = []
+    scope_names: list[str] = []
+    func_stack: list[str] = []
+
+    # Stack items: (action, payload) where action 0 = enter node, 1 = exit class, 2 = exit func
+    stack: list[tuple[int, ast.AST | None]] = [(0, tree)]
+    while stack:
+        action, node = stack.pop()
+        if action == 1:
+            class_stack.pop()
+            scope_names.pop()
+            continue
+        if action == 2:
+            func_stack.pop()
+            scope_names.pop()
+            continue
+
+        assert node is not None
+        t = type(node)
+        if t is ast.Call:
+            if func_stack:
+                callee = _call_name(node.func)  # type: ignore[attr-defined]
+                if callee:
+                    raw_calls[func_stack[-1]].append(callee)
+        elif t is ast.Import:
+            for alias in node.names:  # type: ignore[attr-defined]
+                imports.append(alias.name)
+                if alias.asname:
+                    aliases[alias.asname] = alias.name.split(".")[-1]
+            continue
+        elif t is ast.ImportFrom:
+            mod = node.module  # type: ignore[attr-defined]
+            if mod:
+                imports.append(mod)
+            for alias in node.names:  # type: ignore[attr-defined]
+                if not mod and alias.name != "*":
+                    imports.append(alias.name)
+                if alias.asname and alias.name != "*":
+                    aliases[alias.asname] = alias.name
+            continue
+        elif t is ast.ClassDef:
+            name = node.name  # type: ignore[attr-defined]
+            scope_names.append(name)
+            sym_id = f"{rel_path}::{'.'.join(scope_names)}"
+            doc = ast.get_docstring(node) or ""  # type: ignore[arg-type]
+            lineno = node.lineno  # type: ignore[attr-defined]
+            end_lineno = node.end_lineno or lineno  # type: ignore[attr-defined]
+            symbols.append(
+                SymbolNode(
+                    id=sym_id,
+                    name=name,
+                    kind="class",
+                    file=rel_path,
+                    language="python",
+                    start_line=lineno,
+                    end_line=end_lineno,
+                    docstring=doc.splitlines()[0] if doc else "",
+                    parent=class_stack[-1] if class_stack else None,
+                )
+            )
+            class_stack.append(name)
+            stack.append((1, None))
+        elif t is ast.FunctionDef or t is ast.AsyncFunctionDef:
+            in_class_directly = bool(class_stack) and not func_stack
+            kind = "method" if in_class_directly else "function"
+            parent = class_stack[-1] if class_stack else None
+            name = node.name  # type: ignore[attr-defined]
+            scope_names.append(name)
+            sym_id = f"{rel_path}::{'.'.join(scope_names)}"
+            doc = ast.get_docstring(node) or ""  # type: ignore[arg-type]
+            lineno = node.lineno  # type: ignore[attr-defined]
+            end_lineno = node.end_lineno or lineno  # type: ignore[attr-defined]
+            symbols.append(
+                SymbolNode(
+                    id=sym_id,
+                    name=name,
+                    kind=kind,
+                    file=rel_path,
+                    language="python",
+                    start_line=lineno,
+                    end_line=end_lineno,
+                    docstring=doc.splitlines()[0] if doc else "",
+                    parent=parent,
+                )
+            )
+            raw_calls.setdefault(sym_id, [])
+            func_stack.append(sym_id)
+            stack.append((2, None))
+
+        children = list(ast.iter_child_nodes(node))
+        for child in reversed(children):
+            stack.append((0, child))
+
     return ParsedFile(
-        symbols=visitor.symbols,
-        raw_calls=visitor.raw_calls,
-        imports=visitor.imports,
-        aliases=visitor.aliases,
+        symbols=symbols,
+        raw_calls=raw_calls,
+        imports=imports,
+        aliases=aliases,
     )

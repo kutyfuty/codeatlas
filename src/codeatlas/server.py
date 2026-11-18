@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from .analysis import compute_impact, evaluate_check, load_config
 from .models import CodeGraph
 from .scanner import scan_directory
 
@@ -81,7 +82,57 @@ class _AtlasHandler(BaseHTTPRequestHandler):
             self._handle_file_snippet(parse_qs(parsed.query))
             return
 
+        if route == "/api/impact":
+            self._handle_impact(parse_qs(parsed.query))
+            return
+
+        if route == "/api/check":
+            self._handle_check(parse_qs(parsed.query))
+            return
+
         self._serve_static(route)
+
+    def _handle_impact(self, qs: dict[str, list[str]]) -> None:
+        files = [f for f in qs.get("file", []) if f]
+        symbols = [s for s in qs.get("symbol", []) if s]
+        diff_ref = (qs.get("diff") or [""])[0].strip() or None
+        use_git = (qs.get("git") or ["1"])[0] != "0"
+        try:
+            max_depth = max(1, min(20, int((qs.get("depth") or ["8"])[0])))
+        except ValueError:
+            self._send_json({"error": "Invalid depth parameter"}, HTTPStatus.BAD_REQUEST)
+            return
+
+        with self.state.lock:
+            graph = self.state.graph
+
+        payload = compute_impact(
+            graph,
+            changed_files=files or None,
+            symbol_queries=symbols or None,
+            git_ref=diff_ref,
+            use_git=use_git and not (files or symbols),
+            max_depth=max_depth,
+        )
+        self._send_json(payload)
+
+    def _handle_check(self, qs: dict[str, list[str]]) -> None:
+        with self.state.lock:
+            graph = self.state.graph
+        cfg = load_config(self.state.root)
+        if qs.get("max_cycles"):
+            try:
+                cfg.max_cycles = int(qs["max_cycles"][0])
+            except ValueError:
+                self._send_json({"error": "Invalid max_cycles"}, HTTPStatus.BAD_REQUEST)
+                return
+        if qs.get("min_health"):
+            try:
+                cfg.min_health = int(qs["min_health"][0])
+            except ValueError:
+                self._send_json({"error": "Invalid min_health"}, HTTPStatus.BAD_REQUEST)
+                return
+        self._send_json(evaluate_check(graph, cfg))
 
     def _handle_file_snippet(self, qs: dict[str, list[str]]) -> None:
         rel = (qs.get("path") or [""])[0]

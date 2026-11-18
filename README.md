@@ -19,22 +19,24 @@ Inspect functions, classes, call-graph hubs, unreferenced ("dead") code, circula
 
 ## Key Features
 
-- **Zero Runtime Dependencies:** Pure Python standard-library CLI (`pip` / `pipx` ready).
+- **Zero Runtime Dependencies:** Pure Python standard-library CLI (`pip` / `pipx` ready), with optional `codeatlas-viz[treesitter]` extra for Tree-sitter AST parsing.
 - **Multi-Language Analysis (9 Languages):**
-  - **Python:** Full `ast` parsing for classes, methods, nested functions, docstrings, relative imports, and import aliases.
-  - **JavaScript / TypeScript / Svelte:** Structural analysis of functions, arrow functions, ES6 classes, methods, getters/setters, class arrow properties, and `<script>` blocks.
-  - **Go / Rust / Java / C / C++:** Structural parsing of structs, traits/impl blocks, receiver methods, classes, and member call sites.
-- **Architectural Health Score & Standalone HTML Report:**
-  - Computes a `0–100` repository health score based on circular dependency and dead-code ratios.
-  - Export self-contained single-file `.html` architecture reports (`codeatlas export . --format html -o report.html`).
+  - **Python:** Full iterative `ast` parsing for classes, methods, nested functions, docstrings, relative imports, and import aliases.
+  - **JavaScript / TypeScript / Svelte:** Structural analysis (or optional Tree-sitter AST) of functions, arrow functions, ES6 classes, methods, getters/setters, class arrow properties, and `<script>` blocks.
+  - **Go / Rust / Java / C / C++:** Structural parsing (or optional Tree-sitter AST) of structs, traits/impl blocks, receiver methods, classes, and member call sites.
+- **Change Impact / Blast Radius (`codeatlas impact`):**
+  - Reads local `git diff` (or explicit `--file` / `--symbol` / `--diff REF`) and traces every upstream caller, affected entrypoint, and test reaching changed code.
+- **CI Architecture Gate (`codeatlas check`):**
+  - Enforces `--max-cycles`, `--min-health`, `--max-dead-ratio`, and module boundary rules (`--rule ui/*:db/*` or `.codeatlas.toml`) in CI pipelines.
+- **Built-in Stdio MCP Server (`codeatlas mcp`):**
+  - Zero-dependency Model Context Protocol server exposing call-graph, shortest-path, dead-code, and blast-radius tools to Claude Code, Cursor, or Windsurf.
+- **Architectural Health Score & Standalone Exports (`export`):**
+  - Computes a `0–100` repository health score and exports standalone `.html`, GitHub-flavored `.md`, `.mmd` (Mermaid), and `.json`.
 - **Interactive Svelte 5 Web UI (`codeatlas serve`):**
-  - Switch between **Symbol-Level** and **File-Level** dependency graphs.
-  - **Hubs, Circular Dependencies (`Cycles`), and Unreferenced (`Dead`)** tabs.
+  - Switch between **Symbol**, **File**, and **Folder Cluster** views with interactive folder drill-down and spatial grid force layout.
+  - **Hubs, Circular Dependencies (`Cycles`), Unreferenced (`Dead`), and Blast Radius (`Impact`)** tabs.
   - **Shortest Call-Path Finder (BFS):** Highlight the exact call chain (`A → ... → B`) between any two symbols.
-  - **Focus 1-Hop Mode:** Isolate callers and callees of the selected symbol.
-  - **Live Source Preview:** Inspect exact source lines directly in the side panel.
-  - **One-Click Exports:** Download `.svg` or `.mmd` (Mermaid) diagrams directly from the toolbar.
-- **Fast & Scalable:** Iterative Tarjan strongly-connected-components (SCC) cycle detection, precompiled `.gitignore` matching, and automatic minified bundle filtering.
+  - **Focus 1-Hop Mode, Live Source Preview, and `.svg`/`.mmd` downloads.**
 
 ---
 
@@ -56,8 +58,11 @@ flowchart LR
 ## Installation
 
 ```bash
-# Run directly with pipx / uvx (once published to PyPI)
+# Run directly with pipx / uvx
 pipx install codeatlas-viz
+
+# Optional: install Tree-sitter AST backend for non-Python languages
+pip install "codeatlas-viz[treesitter]"
 
 # Or install from source
 git clone https://github.com/kutyfuty/codeatlas.git
@@ -97,6 +102,51 @@ codeatlas export . --format mermaid -o architecture.mmd
 
 # Export full graph analytics as JSON
 codeatlas export . --format json -o graph.json
+```
+
+### 4. Change Blast Radius (`impact`)
+
+```bash
+# Trace upstream callers, entrypoints & tests affected by git working-tree diff
+codeatlas impact .
+
+# Or check a specific git diff / file / symbol as Markdown (ideal for PR comments)
+codeatlas impact . --diff HEAD~1 --format markdown
+codeatlas impact . --symbol scan_directory
+```
+
+### 5. CI Architecture Gate (`check`)
+
+```bash
+codeatlas check . --max-cycles 0 --min-health 80 --rule "src/ui/*:src/db/*"
+```
+
+Or define persistent rules in `.codeatlas.toml`:
+
+```toml
+[check]
+max_cycles = 0
+min_health = 80
+
+[[rules]]
+name = "UI must go through service layer"
+from = "src/ui/*"
+forbid = "src/db/*"
+```
+
+### 6. Built-in MCP Server (`mcp`)
+
+Add CodeAtlas to Claude Code / Cursor / Windsurf via zero-dependency stdio JSON-RPC:
+
+```json
+{
+  "mcpServers": {
+    "codeatlas": {
+      "command": "codeatlas",
+      "args": ["mcp", "/path/to/repo"]
+    }
+  }
+}
 ```
 
 ---

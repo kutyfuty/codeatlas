@@ -8,7 +8,7 @@ import re
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from .analyzers import analyze_file
+from .analyzers import EXTENSION_LANGUAGE, analyze_file, has_treesitter
 from .analyzers.base import ParsedFile
 from .models import CallEdge, CodeGraph, FileSummary, SymbolNode
 
@@ -248,11 +248,15 @@ def scan_directory(root_path: str | Path, extra_ignores: list[str] | None = None
             )
 
             for fname in sorted(filenames):
-                fpath = Path(dirpath) / fname
-                rel_posix = fpath.relative_to(root).as_posix()
+                dot = fname.rfind(".")
+                if dot == -1 or fname[dot:].lower() not in EXTENSION_LANGUAGE:
+                    continue
+
+                rel_posix = f"{rel_dir}/{fname}" if rel_dir != "." else fname
                 if _is_ignored(rel_posix, fname, compiled_patterns):
                     continue
 
+                fpath = Path(dirpath) / fname
                 analyzed = analyze_file(fpath, rel_posix)
                 if analyzed is None:
                     continue
@@ -285,24 +289,31 @@ def scan_directory(root_path: str | Path, extra_ignores: list[str] | None = None
             file_meta[node.file] = (stem, parent_dir, set(c_path.with_suffix("").parts))
 
     edge_counts: Counter[tuple[str, str]] = Counter()
+    resolve_cache: dict[tuple[str, str | None, str], SymbolNode | None] = {}
     for rel_posix, parsed in parsed_files:
         import_paths = _build_import_paths(parsed.imports)
         for caller_id, callees in parsed.raw_calls.items():
             caller_node = node_map.get(caller_id)
+            caller_parent = caller_node.parent if caller_node else None
             for raw_callee in callees:
                 if (rel_posix, raw_callee) in by_file_and_name:
                     callee_name = raw_callee
                 else:
                     callee_name = parsed.aliases.get(raw_callee, raw_callee)
-                target = _resolve_target(
-                    callee_name,
-                    caller_node,
-                    rel_posix,
-                    import_paths,
-                    by_file_and_name,
-                    by_name,
-                    file_meta,
-                )
+                cache_key = (rel_posix, caller_parent, callee_name)
+                if cache_key in resolve_cache:
+                    target = resolve_cache[cache_key]
+                else:
+                    target = _resolve_target(
+                        callee_name,
+                        caller_node,
+                        rel_posix,
+                        import_paths,
+                        by_file_and_name,
+                        by_name,
+                        file_meta,
+                    )
+                    resolve_cache[cache_key] = target
                 if target and target.id != caller_id:
                     edge_counts[(caller_id, target.id)] += 1
 
@@ -332,4 +343,5 @@ def scan_directory(root_path: str | Path, extra_ignores: list[str] | None = None
         file_edges=file_edges,
         files=files,
         cycles=cycles,
+        analyzer_engine="ast+treesitter" if has_treesitter() else "ast+structural",
     )

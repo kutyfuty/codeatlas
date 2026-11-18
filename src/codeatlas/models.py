@@ -61,6 +61,7 @@ class CodeGraph:
     file_edges: list[CallEdge] = field(default_factory=list)
     files: list[FileSummary] = field(default_factory=list)
     cycles: list[list[str]] = field(default_factory=list)
+    analyzer_engine: str = "ast+structural"
 
     def stats(self) -> dict[str, Any]:
         """Compute summary statistics and top hubs for quick inspection."""
@@ -90,6 +91,7 @@ class CodeGraph:
             "cycle_count": len(self.cycles),
             "unreferenced_count": unreferenced,
             "health_score": health_score,
+            "analyzer_engine": self.analyzer_engine,
             "languages": by_lang,
             "hotspots": [
                 {

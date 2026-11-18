@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codeatlas-viz"
-version = "0.2.3"
+version = "0.3.0"
 description = "Zero-config local codebase architecture & call-graph visualizer with an interactive Svelte UI."
 readme = "README.md"
 license = {text = "MIT"}
@@ -34,6 +34,7 @@ Issues = "https://github.com/kutyfuty/codeatlas/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+treesitter = ["tree-sitter>=0.23", "tree-sitter-language-pack>=0.4"]
 
 [project.scripts]
 codeatlas = "codeatlas.cli:main"
