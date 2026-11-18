@@ -4,6 +4,17 @@
 
 Inspect functions, classes, call-graph hubs, unreferenced ("dead") code, circular dependencies, and shortest call paths in your terminal or browser—with zero cloud uploads, zero configuration files, and zero runtime dependencies for the CLI.
 
+![CodeAtlas interactive Svelte call-graph demo](docs/demo.gif)
+
+<details>
+<summary>More screenshots (Overview, Focus 1-hop, File-level Graph)</summary>
+
+| Symbol Graph & Path Finder | Focus 1-Hop Isolation | File Dependency Map |
+|---|---|---|
+| ![CodeAtlas Symbol Graph](docs/demo-ui.png) | ![CodeAtlas Focus 1-Hop](docs/demo-focus.png) | ![CodeAtlas File Graph](docs/demo-files.png) |
+
+</details>
+
 ---
 
 ## Key Features

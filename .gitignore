@@ -7,4 +7,5 @@ build/
 .venv/
 frontend/node_modules/
 frontend/.svelte-kit/
+brag-output/
 .DS_Store

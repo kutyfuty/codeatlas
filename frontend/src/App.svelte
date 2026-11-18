@@ -97,11 +97,38 @@
     }
   }
 
+  function fitToView(nodes, posMap = positions) {
+    if (!canvasEl || !nodes || nodes.length === 0) return;
+    const width = canvasEl.clientWidth || 900;
+    const height = canvasEl.clientHeight || 600;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const n of nodes) {
+      const p = posMap[n.id];
+      if (!p) continue;
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+    if (!Number.isFinite(minX)) return;
+    const pad = 90;
+    const spanX = Math.max(maxX - minX + pad * 2, 240);
+    const spanY = Math.max(maxY - minY + pad * 2, 240);
+    const nextZoom = Math.max(0.25, Math.min(1.25, Math.min(width / spanX, height / spanY)));
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    zoom = nextZoom;
+    pan = {
+      x: width / 2 - cx * nextZoom,
+      y: height / 2 - cy * nextZoom,
+    };
+  }
+
   function layoutNodes(nodes, edges) {
     const pos = {};
     const count = Math.max(nodes.length, 1);
     const cols = Math.ceil(Math.sqrt(count));
-    const spacing = 145;
+    const spacing = 165;
 
     nodes.forEach((n, idx) => {
       const col = idx % cols;
@@ -127,9 +154,9 @@
           const dx = pos[a].x - pos[b].x;
           const dy = pos[a].y - pos[b].y;
           const dist2 = dx * dx + dy * dy + 0.01;
-          if (dist2 < 90000) {
+          if (dist2 < 110000) {
             const dist = Math.sqrt(dist2);
-            const force = 3200 / dist2;
+            const force = 4400 / dist2;
             const fx = (dx / dist) * force * 18;
             const fy = (dy / dist) * force * 18;
             disp[a].x += fx;
@@ -144,7 +171,7 @@
         const dx = pos[e.target].x - pos[e.source].x;
         const dy = pos[e.target].y - pos[e.source].y;
         const dist = Math.sqrt(dx * dx + dy * dy) + 0.01;
-        const force = (dist - 140) * 0.06;
+        const force = (dist - 155) * 0.06;
         const fx = (dx / dist) * force;
         const fy = (dy / dist) * force;
         disp[e.source].x += fx;
@@ -160,6 +187,7 @@
     }
 
     positions = pos;
+    requestAnimationFrame(() => fitToView(nodes.slice(0, 250), pos));
   }
 
   async function selectNode(node) {
@@ -189,6 +217,7 @@
     viewMode = mode;
     selectedId = null;
     pathTargetId = '';
+    focusOnly = false;
     highlightedCycle = null;
     snippet = null;
     recomputeLayout();
@@ -309,12 +338,11 @@
   let cycleNodeSet = $derived(new Set(highlightedCycle || []));
 
   function resetView() {
-    pan = { x: 0, y: 0 };
-    zoom = 1;
     search = '';
     langFilter = 'all';
     focusOnly = false;
     highlightedCycle = null;
+    fitToView(visibleNodes);
   }
 
   function onWheel(e) {
@@ -752,7 +780,7 @@
                   stroke-width={isSel || inCycle ? 3 : 2}
                 />
                 <text y="26" text-anchor="middle" class="node-label">
-                  {node.name}
+                  {node.name.length > 22 ? node.name.slice(0, 20) + '…' : node.name}
                 </text>
               </g>
             {/each}
