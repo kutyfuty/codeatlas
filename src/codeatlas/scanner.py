@@ -40,6 +40,10 @@ _AMBIGUOUS_GLOBAL_NAMES = frozenset({
     "join", "split", "strip", "replace", "find", "filter", "map", "reduce",
     "sort", "copy", "clear", "len", "str", "int", "float", "list", "dict",
     "print", "log", "info", "debug", "warn", "error", "parse", "render",
+    "then", "catch", "finally", "resolve", "reject", "push", "slice", "splice",
+    "shift", "unshift", "includes", "indexOf", "toString", "valueOf",
+    "unwrap", "expect", "clone", "default", "new", "from", "into", "ok",
+    "err", "some", "none", "collect", "iter", "next", "is_empty", "String", "Error",
 })
 
 
@@ -74,23 +78,6 @@ def _is_ignored(rel_posix: str, name: str, compiled_patterns: list[re.Pattern[st
     for pat in compiled_patterns:
         if pat.match(name) or pat.match(rel_posix):
             return True
-    return False
-
-
-def _looks_minified(path: Path) -> bool:
-    """Detect minified JS/TS bundles by checking for abnormally long lines."""
-    if path.suffix.lower() not in {".js", ".mjs", ".jsx", ".ts", ".tsx"}:
-        return False
-    try:
-        with path.open("r", encoding="utf-8", errors="replace") as f:
-            for _ in range(10):
-                line = f.readline()
-                if not line:
-                    break
-                if len(line) > 700:
-                    return True
-    except OSError:
-        return False
     return False
 
 
@@ -175,7 +162,7 @@ def _resolve_target(
     caller_import_paths: list[list[str]],
     by_file_and_name: dict[tuple[str, str], list[SymbolNode]],
     by_name: dict[str, list[SymbolNode]],
-    file_meta: dict[str, tuple[str, set[str]]],
+    file_meta: dict[str, tuple[str, str, set[str]]],
 ) -> SymbolNode | None:
     """Resolve a raw callee name to the most likely SymbolNode."""
     # 1. Same-file symbol (prefer same-class method if caller is inside a class)
@@ -191,14 +178,21 @@ def _resolve_target(
     if not candidates:
         return None
 
-    # 2. Imported module/file hint match (scored by matching path segments)
+    # 2. Imported module/file/package hint match (scored by matching path segments)
     if caller_import_paths:
         best_score = 0
         best_candidate: SymbolNode | None = None
         for c in candidates:
-            stem, c_parts = file_meta[c.file]
+            stem, parent_dir, c_parts = file_meta[c.file]
             for parts in caller_import_paths:
-                if parts and stem in parts:
+                if not parts:
+                    continue
+                if stem in parts:
+                    score = sum(1 for p in parts if p in c_parts) + 1
+                    if score > best_score:
+                        best_score = score
+                        best_candidate = c
+                elif parent_dir and parent_dir == parts[-1]:
                     score = sum(1 for p in parts if p in c_parts)
                     if score > best_score:
                         best_score = score
@@ -214,55 +208,71 @@ def _resolve_target(
 
 
 def scan_directory(root_path: str | Path, extra_ignores: list[str] | None = None) -> CodeGraph:
-    """Scan a codebase directory and return its resolved CodeGraph."""
+    """Scan a codebase directory (or single source file) and return its resolved CodeGraph."""
     root = Path(root_path).resolve()
-    patterns = _load_gitignore(root)
-    if extra_ignores:
-        patterns.extend(extra_ignores)
-    compiled_patterns = _compile_ignore_patterns(patterns)
-
     files: list[FileSummary] = []
     parsed_files: list[tuple[str, ParsedFile]] = []
     all_nodes: list[SymbolNode] = []
 
-    for dirpath, dirnames, filenames in os.walk(root):
-        rel_dir = Path(dirpath).relative_to(root).as_posix()
-        dirnames[:] = sorted(
-            d
-            for d in dirnames
-            if not _is_ignored(
-                f"{rel_dir}/{d}" if rel_dir != "." else d,
-                d,
-                compiled_patterns,
-            )
-        )
-
-        for fname in sorted(filenames):
-            fpath = Path(dirpath) / fname
-            rel_posix = fpath.relative_to(root).as_posix()
-            if _is_ignored(rel_posix, fname, compiled_patterns) or _looks_minified(fpath):
-                continue
-
-            analyzed = analyze_file(fpath, rel_posix)
-            if analyzed is None:
-                continue
-
+    if root.is_file():
+        analyzed = analyze_file(root, root.name)
+        if analyzed is not None:
             lang, line_count, parsed = analyzed
             files.append(
                 FileSummary(
-                    path=rel_posix,
+                    path=root.name,
                     language=lang,
                     lines=line_count,
                     symbol_count=len(parsed.symbols),
                 )
             )
-            parsed_files.append((rel_posix, parsed))
+            parsed_files.append((root.name, parsed))
             all_nodes.extend(parsed.symbols)
+        root = root.parent
+    else:
+        patterns = _load_gitignore(root)
+        if extra_ignores:
+            patterns.extend(extra_ignores)
+        compiled_patterns = _compile_ignore_patterns(patterns)
+
+        for dirpath, dirnames, filenames in os.walk(root):
+            rel_dir = Path(dirpath).relative_to(root).as_posix()
+            dirnames[:] = sorted(
+                d
+                for d in dirnames
+                if not _is_ignored(
+                    f"{rel_dir}/{d}" if rel_dir != "." else d,
+                    d,
+                    compiled_patterns,
+                )
+            )
+
+            for fname in sorted(filenames):
+                fpath = Path(dirpath) / fname
+                rel_posix = fpath.relative_to(root).as_posix()
+                if _is_ignored(rel_posix, fname, compiled_patterns):
+                    continue
+
+                analyzed = analyze_file(fpath, rel_posix)
+                if analyzed is None:
+                    continue
+
+                lang, line_count, parsed = analyzed
+                files.append(
+                    FileSummary(
+                        path=rel_posix,
+                        language=lang,
+                        lines=line_count,
+                        symbol_count=len(parsed.symbols),
+                    )
+                )
+                parsed_files.append((rel_posix, parsed))
+                all_nodes.extend(parsed.symbols)
 
     by_file_and_name: dict[tuple[str, str], list[SymbolNode]] = defaultdict(list)
     by_name: dict[str, list[SymbolNode]] = defaultdict(list)
     node_map: dict[str, SymbolNode] = {}
-    file_meta: dict[str, tuple[str, set[str]]] = {}
+    file_meta: dict[str, tuple[str, str, set[str]]] = {}
 
     for node in all_nodes:
         node_map[node.id] = node
@@ -271,7 +281,8 @@ def scan_directory(root_path: str | Path, extra_ignores: list[str] | None = None
         if node.file not in file_meta:
             c_path = Path(node.file)
             stem = c_path.parent.name if c_path.stem in {"__init__", "index"} else c_path.stem
-            file_meta[node.file] = (stem, set(c_path.with_suffix("").parts))
+            parent_dir = c_path.parent.name
+            file_meta[node.file] = (stem, parent_dir, set(c_path.with_suffix("").parts))
 
     edge_counts: Counter[tuple[str, str]] = Counter()
     for rel_posix, parsed in parsed_files:

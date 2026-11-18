@@ -257,7 +257,18 @@
 
   let deadSymbols = $derived.by(() => {
     if (!graph) return [];
-    return graph.nodes.filter((n) => n.kind !== 'class' && n.fan_in === 0);
+    return graph.nodes.filter(
+      (n) => n.kind !== 'class' && n.fan_in === 0 && (langFilter === 'all' || n.language === langFilter)
+    );
+  });
+
+  let filteredHubs = $derived.by(() => {
+    if (!graph) return [];
+    if (langFilter === 'all') return graph.stats.hotspots;
+    return graph.nodes
+      .filter((n) => n.language === langFilter && (n.fan_in + n.fan_out) > 0)
+      .sort((a, b) => (b.fan_in + b.fan_out) - (a.fan_in + a.fan_out))
+      .slice(0, 10);
   });
 
   // Shortest directed call path from selectedId -> pathTargetId via BFS
@@ -359,7 +370,23 @@
     }
   }
 
+  function centerOnNode(nodeId) {
+    if (!canvasEl || !positions[nodeId]) return;
+    const rect = canvasEl.getBoundingClientRect();
+    const p = positions[nodeId];
+    pan = {
+      x: rect.width / 2 - p.x * zoom,
+      y: rect.height / 2 - p.y * zoom,
+    };
+  }
+
   function onPointerUp() {
+    if (draggingCanvas && !didDrag) {
+      selectedId = null;
+      pathTargetId = '';
+      highlightedCycle = null;
+      snippet = null;
+    }
     draggingCanvas = false;
     draggingNode = null;
   }
@@ -481,7 +508,12 @@
         <option value="cpp">C++</option>
       </select>
       <label class="toggle">
-        <input type="checkbox" bind:checked={focusOnly} disabled={!selectedId} />
+        <input
+          type="checkbox"
+          bind:checked={focusOnly}
+          disabled={!selectedId}
+          onchange={() => { if (focusOnly && selectedId) centerOnNode(selectedId); }}
+        />
         Focus 1-hop
       </label>
       <button onclick={resetView} title="Reset pan, zoom, and filters">
@@ -518,7 +550,7 @@
           <section>
             <h3>Top Hubs</h3>
             <ul class="list">
-              {#each graph.stats.hotspots as hub}
+              {#each filteredHubs as hub}
                 <li>
                   <button
                     class="list-btn"

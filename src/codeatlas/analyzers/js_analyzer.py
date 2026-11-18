@@ -51,58 +51,21 @@ def _extract_svelte_scripts(source: str) -> str:
     return "".join(ch if (keep[idx] or ch == "\n") else " " for idx, ch in enumerate(chars))
 
 
+_STRIP_RE = re.compile(
+    r'//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'|`(?:\\.|[^`\\])*`'
+)
+
+
+def _blank_match(m: re.Match[str]) -> str:
+    txt = m.group(0)
+    if "\n" not in txt:
+        return " " * len(txt)
+    return "\n".join(" " * len(part) for part in txt.split("\n"))
+
+
 def _strip_comments_and_strings(code: str) -> str:
-    """Replace comments and string/template contents with spaces, keeping newlines."""
-    out: list[str] = []
-    i = 0
-    n = len(code)
-    while i < n:
-        ch = code[i]
-        nxt = code[i + 1] if i + 1 < n else ""
-
-        if ch == "/" and nxt == "/":
-            while i < n and code[i] != "\n":
-                out.append(" ")
-                i += 1
-            continue
-
-        if ch == "/" and nxt == "*":
-            out.append("  ")
-            i += 2
-            while i < n and not (code[i] == "*" and i + 1 < n and code[i + 1] == "/"):
-                out.append("\n" if code[i] == "\n" else " ")
-                i += 1
-            if i < n:
-                out.append("  ")
-                i += 2
-            continue
-
-        if ch in ('"', "'", "`"):
-            quote = ch
-            out.append(quote)
-            i += 1
-            while i < n:
-                c = code[i]
-                if c == "\\":
-                    out.append(" ")
-                    if i + 1 < n:
-                        out.append("\n" if code[i + 1] == "\n" else " ")
-                        i += 2
-                    else:
-                        i += 1
-                    continue
-                if c == quote:
-                    out.append(quote)
-                    i += 1
-                    break
-                out.append("\n" if c == "\n" else " ")
-                i += 1
-            continue
-
-        out.append(ch)
-        i += 1
-
-    return "".join(out)
+    """Replace comments and string/template contents with spaces, keeping exact offsets and newlines."""
+    return _STRIP_RE.sub(_blank_match, code)
 
 
 def _find_matching_brace(code: str, open_idx: int) -> int:
@@ -119,8 +82,13 @@ def _find_matching_brace(code: str, open_idx: int) -> int:
 
 
 def _build_line_index(code: str) -> list[int]:
-    """Build sorted byte/char offsets of all newlines for O(log L) line lookup."""
-    return [idx for idx, ch in enumerate(code) if ch == "\n"]
+    """Build sorted char offsets of all newlines using C-level str.find."""
+    newlines: list[int] = []
+    pos = code.find("\n")
+    while pos != -1:
+        newlines.append(pos)
+        pos = code.find("\n", pos + 1)
+    return newlines
 
 
 def _line_at(newlines: list[int], idx: int) -> int:

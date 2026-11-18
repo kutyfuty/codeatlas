@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codeatlas"
-version = "0.2.0"
+version = "0.2.1"
 description = "Zero-config local codebase architecture & call-graph visualizer with an interactive Svelte UI."
 readme = "README.md"
 license = {text = "MIT"}

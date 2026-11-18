@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import socket
 import threading
 import webbrowser
 from functools import partial
@@ -17,6 +18,7 @@ from .models import CodeGraph
 from .scanner import scan_directory
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
+MAX_PREVIEW_BYTES = 2_000_000
 
 
 class _AppState:
@@ -98,6 +100,10 @@ class _AtlasHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "File not found"}, HTTPStatus.NOT_FOUND)
             return
 
+        if target.stat().st_size > MAX_PREVIEW_BYTES:
+            self._send_json({"error": "File exceeds 2 MB preview limit"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+            return
+
         try:
             all_lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError as exc:
@@ -150,13 +156,22 @@ class _AtlasHandler(BaseHTTPRequestHandler):
         self._send_file_bytes(candidate.read_bytes(), content_type)
 
 
+class _AtlasHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    # On Windows, SO_REUSEADDR allows port hijacking and conflicts with SO_EXCLUSIVEADDRUSE.
+    allow_reuse_address = not hasattr(socket, "SO_EXCLUSIVEADDRUSE")
+
+    def server_bind(self) -> None:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 def create_server(root: Path, graph: CodeGraph, host: str = "127.0.0.1", port: int = 4173) -> ThreadingHTTPServer:
     """Create a configured ThreadingHTTPServer without starting its loop."""
     state = _AppState(root=root, graph=graph)
     handler = partial(_AtlasHandler, state=state)
-    server = ThreadingHTTPServer((host, port), handler)
-    server.daemon_threads = True
-    return server
+    return _AtlasHTTPServer((host, port), handler)
 
 
 def serve_graph(
@@ -167,10 +182,22 @@ def serve_graph(
     open_browser: bool = True,
 ) -> None:
     """Start the local CodeAtlas server and block until Ctrl+C."""
-    server = create_server(root, graph, host=host, port=port)
+    server: ThreadingHTTPServer | None = None
+    last_err: OSError | None = None
+    for candidate_port in range(port, port + 11):
+        try:
+            server = create_server(root, graph, host=host, port=candidate_port)
+            if candidate_port != port:
+                print(f"Port {port} busy; switched to port {candidate_port}.", flush=True)
+            break
+        except OSError as exc:
+            last_err = exc
+    if server is None:
+        raise RuntimeError(f"Could not bind HTTP server on ports {port}-{port + 10}: {last_err}")
+
     actual_port = server.server_address[1]
     url = f"http://{host}:{actual_port}"
-    print(f"CodeAtlas UI running at {url}  (Press Ctrl+C to stop)")
+    print(f"CodeAtlas UI running at {url}  (Press Ctrl+C to stop)", flush=True)
     if open_browser:
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()
     try:

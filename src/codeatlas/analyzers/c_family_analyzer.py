@@ -38,12 +38,12 @@ _RUST_FN_RE = re.compile(
 )
 _RUST_USE_RE = re.compile(r"""(?:^|\n)\s*use\s+([A-Za-z_][\w:]*)\s*;""")
 
-# Java / C / C++ classes & functions/methods
+# Java / C / C++ classes & functions/methods (no nested quantifiers to avoid ReDoS)
 _CLASS_STRUCT_RE = re.compile(
     r"""(?:^|[\n;{}])\s*(?:(?:public|private|protected|abstract|final|static)\s+)*(?:class|struct|interface)\s+([A-Za-z_]\w*)[^{;]*\{""",
 )
 _CFAMILY_FUNC_RE = re.compile(
-    r"""(?:^|[\n;{}])\s*(?:(?:public|private|protected|static|final|virtual|inline|explicit|constexpr|synchronized|native|async)\s+)*(?:[A-Za-z_][\w:<>,*\s&~]*?\s+)+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*(?:const\s*)?(?:noexcept\s*)?(?:override\s*)?(?:throws\s+[A-Za-z0-9_.,\s]+)?\{""",
+    r"""(?:^|[\n;{}])\s*(?:(?:public|private|protected|static|final|virtual|inline|explicit|constexpr|synchronized|native|async)\s+)*(?:[A-Za-z_~][\w:<>,*&]*\s+)+([A-Za-z_~][\w:]*(?:::[A-Za-z_~]\w*)?)\s*\([^;{}]*\)\s*(?:const\s*)?(?:noexcept\s*)?(?:override\s*)?(?:throws\s+[A-Za-z0-9_.,\s]+)?\{""",
 )
 _JAVA_IMPORT_RE = re.compile(r"""(?:^|\n)\s*import\s+(?:static\s+)?([A-Za-z_][\w.]*)\s*;""")
 _CPP_INCLUDE_RE = re.compile(r"""#\s*include\s*[<"]([^>"]+)[>"]""")
@@ -64,6 +64,23 @@ def _extract_calls(body: str) -> list[str]:
         if m.group(1) not in _C_FAMILY_KEYWORDS
     )
     return calls
+
+
+def _innermost_parent(pos: int, spans: list[tuple[int, int, str]]) -> str | None:
+    """Return the innermost enclosing class/impl name for pos."""
+    best_span = None
+    best_name = None
+    for ob, cb, cname in spans:
+        if ob < pos < cb:
+            size = cb - ob
+            if best_span is None or size < best_span:
+                best_span = size
+                best_name = cname
+    return best_name
+
+
+def _inside_any_span(pos: int, spans: list[tuple[int, int]]) -> bool:
+    return any(ob < pos < cb for ob, cb in spans)
 
 
 def analyze_c_family(source: str, rel_path: str, language: str) -> ParsedFile:
@@ -127,25 +144,25 @@ def analyze_c_family(source: str, rel_path: str, language: str) -> ParsedFile:
             cname = m.group(1)
             open_b = m.end() - 1
             close_b = _find_matching_brace(clean, open_b)
-            # Only register struct/enum/trait once as a class node
             register(cname, "class", m.start(1), open_b)
             impl_spans.append((open_b, close_b, cname))
 
+        fn_spans: list[tuple[int, int]] = []
         for m in _RUST_FN_RE.finditer(clean):
             fn_name = m.group(1)
             pos = m.start(1)
-            parent = None
-            for ob, cb, cname in impl_spans:
-                if ob < pos < cb:
-                    parent = cname
-                    break
-            register(
+            if _inside_any_span(pos, fn_spans):
+                continue
+            parent = _innermost_parent(pos, impl_spans)
+            open_b = m.end() - 1
+            close_b = register(
                 fn_name,
                 "method" if parent else "function",
                 pos,
-                m.end() - 1,
+                open_b,
                 parent=parent,
             )
+            fn_spans.append((open_b, close_b))
 
     else:
         # Java, C, C++
@@ -158,23 +175,34 @@ def analyze_c_family(source: str, rel_path: str, language: str) -> ParsedFile:
             close_b = register(cname, "class", m.start(1), open_b)
             class_spans.append((open_b, close_b, cname))
 
+        fn_spans = []
         for m in _CFAMILY_FUNC_RE.finditer(clean):
-            fname = m.group(1)
+            raw_name = m.group(1)
+            pos = m.start(1)
+            if _inside_any_span(pos, fn_spans):
+                continue
+
+            parent: str | None = None
+            fname = raw_name
+            if "::" in raw_name:
+                parts = raw_name.split("::")
+                parent = parts[-2]
+                fname = parts[-1]
+            else:
+                parent = _innermost_parent(pos, class_spans)
+
             if fname in _C_FAMILY_KEYWORDS:
                 continue
-            pos = m.start(1)
-            parent = None
-            for ob, cb, cname in class_spans:
-                if ob < pos < cb:
-                    parent = cname
-                    break
-            register(
+
+            open_b = m.end() - 1
+            close_b = register(
                 fname,
                 "method" if parent else "function",
                 pos,
-                m.end() - 1,
+                open_b,
                 parent=parent,
             )
+            fn_spans.append((open_b, close_b))
 
     symbols.sort(key=lambda s: s.start_line)
     return ParsedFile(symbols=symbols, raw_calls=raw_calls, imports=imports)

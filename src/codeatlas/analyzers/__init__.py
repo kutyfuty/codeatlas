@@ -29,6 +29,23 @@ EXTENSION_LANGUAGE: dict[str, str] = {
 }
 
 _C_FAMILY_LANGS = frozenset({"go", "rust", "java", "c", "cpp"})
+_MINIFIABLE_LANGS = frozenset({"javascript", "typescript"})
+
+
+def _looks_minified_source(source: str, lang: str) -> bool:
+    """Detect minified JS/TS bundles from already-loaded source without re-opening the file."""
+    if lang not in _MINIFIABLE_LANGS:
+        return False
+    pos = 0
+    for _ in range(10):
+        nl = source.find("\n", pos)
+        line_len = (len(source) - pos) if nl == -1 else (nl - pos)
+        if line_len > 700:
+            return True
+        if nl == -1:
+            break
+        pos = nl + 1
+    return False
 
 
 def analyze_file(path: Path, rel_path: str) -> tuple[str, int, ParsedFile] | None:
@@ -40,6 +57,9 @@ def analyze_file(path: Path, rel_path: str) -> tuple[str, int, ParsedFile] | Non
     try:
         source = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
+        return None
+
+    if _looks_minified_source(source, lang):
         return None
 
     line_count = source.count("\n") + (1 if source else 0)

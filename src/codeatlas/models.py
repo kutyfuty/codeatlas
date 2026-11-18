@@ -154,14 +154,17 @@ class CodeGraph:
 <title>CodeAtlas Report — {root_esc}</title>
 <style>
   body {{ margin:0; font-family:Inter,system-ui,sans-serif; background:#020617; color:#e2e8f0; padding:1.5rem; }}
-  header {{ display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #1e293b; padding-bottom:1rem; margin-bottom:1.2rem; }}
+  header {{ display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:0.75rem; border-bottom:1px solid #1e293b; padding-bottom:1rem; margin-bottom:1.2rem; }}
   .pills span {{ background:#1e293b; padding:0.3rem 0.65rem; border-radius:999px; font-size:0.82rem; margin-left:0.4rem; }}
-  .grid {{ display:grid; grid-template-columns:1fr 1fr; gap:1rem; }}
-  .card {{ background:#0f172a; border:1px solid #1e293b; border-radius:8px; padding:1rem; }}
-  h2 {{ margin:0 0 0.75rem; font-size:0.9rem; text-transform:uppercase; color:#94a3b8; }}
-  table {{ width:100%; border-collapse:collapse; font-size:0.84rem; }}
+  .toolbar {{ margin-bottom:1rem; display:flex; gap:0.75rem; align-items:center; }}
+  input {{ background:#0f172a; color:#f8fafc; border:1px solid #334155; border-radius:6px; padding:0.45rem 0.7rem; width:300px; font-size:0.86rem; }}
+  .grid {{ display:grid; grid-template-columns:repeat(auto-fit, minmax(360px, 1fr)); gap:1rem; }}
+  .card {{ background:#0f172a; border:1px solid #1e293b; border-radius:8px; padding:1rem; max-height:420px; overflow:auto; }}
+  h2 {{ margin:0 0 0.75rem; font-size:0.85rem; text-transform:uppercase; letter-spacing:0.04em; color:#94a3b8; }}
+  table {{ width:100%; border-collapse:collapse; font-size:0.82rem; }}
   th, td {{ text-align:left; padding:0.4rem; border-bottom:1px solid #1e293b; }}
   .score {{ color:#22c55e; font-weight:700; }}
+  .warn {{ color:#fb923c; }}
 </style>
 </head>
 <body>
@@ -171,10 +174,14 @@ class CodeGraph:
     <span>{st['total_files']} files</span>
     <span>{st['total_symbols']} symbols</span>
     <span>{st['total_edges']} edges</span>
-    <span>{st['cycle_count']} cycles</span>
+    <span class="warn">{st['cycle_count']} cycles</span>
     <span class="score">Health: {st['health_score']}/100</span>
   </div>
 </header>
+<div class="toolbar">
+  <input id="q" type="search" placeholder="Filter hubs, files, or symbols..." />
+  <span id="langs" style="font-size:0.82rem;color:#94a3b8"></span>
+</div>
 <div class="grid">
   <div class="card">
     <h2>Top Call-Graph Hubs</h2>
@@ -184,22 +191,56 @@ class CodeGraph:
     </table>
   </div>
   <div class="card">
-    <h2>Files Breakdown</h2>
+    <h2>Files Breakdown (<span id="fcount"></span>)</h2>
     <table>
       <thead><tr><th>File</th><th>Language</th><th>Lines</th><th>Symbols</th></tr></thead>
       <tbody id="files"></tbody>
+    </table>
+  </div>
+  <div class="card">
+    <h2>Circular Dependencies (<span id="ccount"></span>)</h2>
+    <table>
+      <thead><tr><th>#</th><th>Cycle Chain</th></tr></thead>
+      <tbody id="cycles"></tbody>
+    </table>
+  </div>
+  <div class="card">
+    <h2>Unreferenced Symbols (fan-in = 0)</h2>
+    <table>
+      <thead><tr><th>Symbol</th><th>Kind</th><th>File</th></tr></thead>
+      <tbody id="dead"></tbody>
     </table>
   </div>
 </div>
 <script>
   const DATA = {data_json};
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
-  document.getElementById('hubs').innerHTML = DATA.stats.hotspots.map(h =>
-    `<tr><td>${{esc(h.name)}}</td><td>${{esc(h.file)}}</td><td>${{h.fan_in}}</td><td>${{h.fan_out}}</td></tr>`
-  ).join('') || '<tr><td colspan="4">No hubs</td></tr>';
-  document.getElementById('files').innerHTML = DATA.files.slice(0, 50).map(f =>
-    `<tr><td>${{esc(f.path)}}</td><td>${{esc(f.language)}}</td><td>${{f.lines}}</td><td>${{f.symbol_count}}</td></tr>`
-  ).join('');
+  document.getElementById('langs').textContent = Object.entries(DATA.stats.languages || {{}}).map(([k,v]) => `${{k}}: ${{v}}`).join(' · ');
+  const render = (q = '') => {{
+    const s = q.trim().toLowerCase();
+    const hubs = DATA.stats.hotspots.filter(h => !s || h.name.toLowerCase().includes(s) || h.file.toLowerCase().includes(s));
+    document.getElementById('hubs').innerHTML = hubs.map(h =>
+      `<tr><td>${{esc(h.name)}}</td><td>${{esc(h.file)}}</td><td>${{h.fan_in}}</td><td>${{h.fan_out}}</td></tr>`
+    ).join('') || '<tr><td colspan="4">No matching hubs</td></tr>';
+
+    const files = DATA.files.filter(f => !s || f.path.toLowerCase().includes(s) || f.language.toLowerCase().includes(s));
+    document.getElementById('fcount').textContent = files.length;
+    document.getElementById('files').innerHTML = files.map(f =>
+      `<tr><td>${{esc(f.path)}}</td><td>${{esc(f.language)}}</td><td>${{f.lines}}</td><td>${{f.symbol_count}}</td></tr>`
+    ).join('') || '<tr><td colspan="4">No matching files</td></tr>';
+
+    document.getElementById('ccount').textContent = DATA.cycles.length;
+    document.getElementById('cycles').innerHTML = DATA.cycles.map((c, i) =>
+      `<tr><td>${{i + 1}}</td><td>${{esc(c.map(x => x.split('::').pop()).join(' ↔ '))}}</td></tr>`
+    ).join('') || '<tr><td colspan="2">No circular dependencies</td></tr>';
+
+    const dead = DATA.nodes.filter(n => n.kind !== 'class' && n.fan_in === 0 && (!s || n.name.toLowerCase().includes(s) || n.file.toLowerCase().includes(s))).slice(0, 100);
+    document.getElementById('dead').innerHTML = dead.map(n =>
+      `<tr><td>${{esc(n.name)}}</td><td>${{esc(n.kind)}}</td><td>${{esc(n.file)}}</td></tr>`
+    ).join('') || '<tr><td colspan="3">None</td></tr>';
+  }};
+  document.getElementById('q').addEventListener('input', (e) => render(e.target.value));
+  render('');
 </script>
 </body>
 </html>"""

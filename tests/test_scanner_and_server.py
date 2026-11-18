@@ -171,6 +171,36 @@ def test_cli_scan_and_export(tmp_path: Path, capsys) -> None:
     html_text = html_file.read_text(encoding="utf-8")
     assert "CodeAtlas Architecture Report" in html_text
     assert "Health:" in html_text
+    assert "Circular Dependencies" in html_text
+    assert "Unreferenced Symbols" in html_text
+
+
+def test_scanner_single_file_and_go_package_import(tmp_path: Path) -> None:
+    single = tmp_path / "solo.py"
+    single.write_text("def a():\n    return b()\n\ndef b():\n    return 1\n", encoding="utf-8")
+    single_graph = scan_directory(single)
+    assert len(single_graph.files) == 1
+    assert ("solo.py::a", "solo.py::b") in {(e.source, e.target) for e in single_graph.edges}
+
+    go_repo = tmp_path / "gorepo"
+    (go_repo / "pkg").mkdir(parents=True)
+    (go_repo / "other").mkdir()
+    (go_repo / "pkg" / "server.go").write_text(
+        "package pkg\nfunc StartServer() {\n    return\n}\n",
+        encoding="utf-8",
+    )
+    (go_repo / "other" / "dup.go").write_text(
+        "package other\nfunc StartServer() {\n    return\n}\n",
+        encoding="utf-8",
+    )
+    (go_repo / "cmd.go").write_text(
+        'package main\nimport "github.com/test/gorepo/pkg"\nfunc main() {\n    pkg.StartServer()\n}\n',
+        encoding="utf-8",
+    )
+    go_graph = scan_directory(go_repo)
+    go_edges = {(e.source, e.target) for e in go_graph.edges}
+    assert ("cmd.go::main", "pkg/server.go::StartServer") in go_edges
+    assert ("cmd.go::main", "other/dup.go::StartServer") not in go_edges
 
 
 def test_server_api_graph_and_file_security(tmp_path: Path) -> None:
@@ -211,6 +241,23 @@ def test_server_api_graph_and_file_security(tmp_path: Path) -> None:
             assert False, "Expected HTTPError 404"
         except urllib.error.HTTPError as err:
             assert err.code == 404
+
+        # Huge file > 2 MB must return 413 Request Entity Too Large
+        big = repo / "huge.py"
+        big.write_text("# " + ("x" * 2_100_000), encoding="utf-8")
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/file?path=huge.py")
+            assert False, "Expected HTTPError 413"
+        except urllib.error.HTTPError as err:
+            assert err.code == 413
+
+        # Binding a second server to the exact same active port must raise OSError
+        try:
+            second = create_server(repo, graph, host="127.0.0.1", port=port)
+            second.server_close()
+            assert False, "Expected OSError when binding an occupied port"
+        except OSError:
+            pass
     finally:
         server.shutdown()
         server.server_close()

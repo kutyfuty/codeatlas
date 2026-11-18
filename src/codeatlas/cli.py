@@ -112,13 +112,17 @@ def main(argv: list[str] | None = None) -> int:
         return _handle_export(target, args.format, args.output)
     if args.command == "serve":
         graph = scan_directory(target)
-        serve_graph(
-            target,
-            graph,
-            host=args.host,
-            port=args.port,
-            open_browser=not args.no_open,
-        )
+        try:
+            serve_graph(
+                target,
+                graph,
+                host=args.host,
+                port=args.port,
+                open_browser=not args.no_open,
+            )
+        except RuntimeError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
         return 0
 
     return 0

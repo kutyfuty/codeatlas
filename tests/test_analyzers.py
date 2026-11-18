@@ -243,3 +243,36 @@ public class OrderService {
     assert "OrderService.java::OrderService" in j_ids
     assert "OrderService.java::OrderService.processOrder" in j_ids
     assert "validateOrder" in j_parsed.raw_calls["OrderService.java::OrderService.processOrder"]
+
+
+def test_cpp_out_of_line_nested_class_and_header_perf() -> None:
+    import time
+
+    cpp_src = '''
+#include "engine.hpp"
+
+class Outer {
+    class Inner {
+        void ping() {
+            pong();
+        }
+    };
+};
+
+void Engine::boot() {
+    initCore();
+}
+'''
+    # Include a long header-like declaration list to ensure zero regex backtracking
+    header_like = "\n".join(f"const std::vector<int>& decl_{i}(int a, int b, int c);" for i in range(150))
+    t0 = time.perf_counter()
+    parsed = analyze_c_family(header_like + "\n" + cpp_src, "engine.cpp", "cpp")
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 0.25
+
+    by_id = {s.id: s for s in parsed.symbols}
+    assert "engine.cpp::Inner.ping" in by_id
+    assert by_id["engine.cpp::Inner.ping"].parent == "Inner"
+    assert "engine.cpp::Engine.boot" in by_id
+    assert by_id["engine.cpp::Engine.boot"].kind == "method"
+    assert "initCore" in parsed.raw_calls["engine.cpp::Engine.boot"]
