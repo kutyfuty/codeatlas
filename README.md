@@ -115,10 +115,17 @@ codeatlas impact . --diff HEAD~1 --format markdown
 codeatlas impact . --symbol scan_directory
 ```
 
-### 5. CI Architecture Gate (`check`)
+### 5. CI Architecture Gate (`check`) & Baseline Diff (`diff`)
 
 ```bash
+# Enforce rules on the full repo
 codeatlas check . --max-cycles 0 --min-health 80 --rule "src/ui/*:src/db/*"
+
+# Baseline mode: ignore pre-existing tech debt, fail ONLY on new cycles or rule violations
+codeatlas check . --baseline origin/main --max-cycles 0
+
+# Architecture diff + PR blast-radius Markdown report
+codeatlas diff . --base origin/main --with-impact --format markdown
 ```
 
 Or define persistent rules in `.codeatlas.toml`:
@@ -134,7 +141,31 @@ from = "src/ui/*"
 forbid = "src/db/*"
 ```
 
-### 6. Built-in MCP Server (`mcp`)
+### 6. GitHub Action (Automated PR Architecture Comments & CI Gate)
+
+Drop this into `.github/workflows/codeatlas.yml` to post a deduplicated Blast Radius & Architecture Diff comment on every Pull Request and block newly introduced cycles:
+
+```yaml
+name: CodeAtlas Architecture
+on: [pull_request]
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  architecture:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: kutyfuty/codeatlas@v0.4.0
+        with:
+          baseline-only: "true"
+          comment-on-pr: "true"
+```
+
+### 7. Built-in MCP Server (`mcp`)
 
 Add CodeAtlas to Claude Code / Cursor / Windsurf via zero-dependency stdio JSON-RPC:
 

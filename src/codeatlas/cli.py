@@ -9,14 +9,20 @@ from pathlib import Path
 
 from . import __version__
 from .analysis import (
+    compare_graphs,
     compute_impact,
     dump_json,
+    evaluate_baseline_check,
     evaluate_check,
     format_check_text,
+    format_diff_markdown,
+    format_diff_text,
     format_impact_markdown,
     format_impact_text,
     load_config,
+    load_graph_from_json,
     parse_rule_spec,
+    scan_git_ref,
 )
 from .mcp_server import serve_mcp_stdio
 from .scanner import scan_directory
@@ -115,11 +121,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_check = sub.add_parser("check", help="Run architectural CI checks (cycles, health score, boundary rules).")
     p_check.add_argument("path", nargs="?", default=".", help="Target repository path (default: .)")
     p_check.add_argument("--config", default=None, help="Path to .codeatlas.toml config file")
+    p_check.add_argument("--baseline", default=None, help="Compare against a git ref and fail only on NEW regressions")
+    p_check.add_argument("--baseline-json", default=None, help="Compare against a saved CodeAtlas JSON snapshot")
     p_check.add_argument("--max-cycles", type=int, default=None, help="Maximum allowed dependency cycles")
     p_check.add_argument("--min-health", type=int, default=None, help="Minimum required health score (0-100)")
     p_check.add_argument("--max-dead-ratio", type=float, default=None, help="Maximum allowed unreferenced callable ratio (0-1)")
     p_check.add_argument("--rule", dest="rules", action="append", default=[], help="Forbid edge FROM_GLOB:FORBID_GLOB (repeatable)")
     p_check.add_argument("--format", choices=("text", "json"), default="text", help="Output format")
+
+    p_diff = sub.add_parser("diff", help="Compare current codebase architecture against a git ref or JSON baseline.")
+    p_diff.add_argument("path", nargs="?", default=".", help="Target repository path (default: .)")
+    p_diff.add_argument("--base", default="HEAD~1", help="Base git ref to compare against (default: HEAD~1)")
+    p_diff.add_argument("--baseline-json", default=None, help="Compare against a saved CodeAtlas JSON snapshot instead of git")
+    p_diff.add_argument("--config", default=None, help="Path to .codeatlas.toml config file")
+    p_diff.add_argument("--rule", dest="rules", action="append", default=[], help="Forbid edge FROM_GLOB:FORBID_GLOB (repeatable)")
+    p_diff.add_argument("--with-impact", action="store_true", help="Include reverse-caller blast radius in Markdown/JSON output")
+    p_diff.add_argument("--format", choices=("text", "json", "markdown", "md"), default="text", help="Output format")
+    p_diff.add_argument("--fail-on-new-cycles", action="store_true", help="Exit 2 if new circular dependencies were introduced")
+    p_diff.add_argument("--fail-on-health-drop", action="store_true", help="Exit 2 if health score decreased")
 
     p_mcp = sub.add_parser("mcp", help="Start a zero-dependency stdio MCP server for AI coding agents.")
     p_mcp.add_argument("path", nargs="?", default=".", help="Target repository path (default: .)")
@@ -129,7 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
-    known_cmds = {"scan", "serve", "export", "impact", "check", "mcp"}
+    known_cmds = {"scan", "serve", "export", "impact", "check", "diff", "mcp"}
     if raw_argv and not raw_argv[0].startswith("-") and raw_argv[0] not in known_cmds:
         raw_argv = ["scan", *raw_argv]
 
@@ -183,12 +202,66 @@ def main(argv: list[str] | None = None) -> int:
             cfg.max_dead_ratio = args.max_dead_ratio
 
         graph = scan_directory(target)
-        res = evaluate_check(graph, cfg)
+        if args.baseline_json or args.baseline:
+            try:
+                if args.baseline_json:
+                    base_graph = load_graph_from_json(Path(args.baseline_json))
+                    base_label = args.baseline_json
+                else:
+                    base_graph = scan_git_ref(target, args.baseline)
+                    base_label = args.baseline
+            except (FileNotFoundError, ValueError) as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                return 1
+            res = evaluate_baseline_check(base_graph, graph, cfg, base_label=base_label)
+        else:
+            res = evaluate_check(graph, cfg)
+
         if args.format == "json":
             print(dump_json(res))
         else:
             print(format_check_text(res))
         return 0 if res["passed"] else 2
+    if args.command == "diff":
+        try:
+            cfg = load_config(target, Path(args.config) if args.config else None)
+            for raw_rule in args.rules:
+                cfg.rules.append(parse_rule_spec(raw_rule))
+            if args.baseline_json:
+                base_graph = load_graph_from_json(Path(args.baseline_json))
+                base_label = args.baseline_json
+            else:
+                base_graph = scan_git_ref(target, args.base)
+                base_label = args.base
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+
+        head_graph = scan_directory(target)
+        diff_res = compare_graphs(base_graph, head_graph, config=cfg, base_label=base_label)
+        impact_res = None
+        if args.with_impact:
+            impact_res = compute_impact(
+                head_graph,
+                git_ref=None if args.baseline_json else args.base,
+                use_git=not bool(args.baseline_json),
+            )
+            diff_res["impact"] = impact_res
+
+        fmt = {"md": "markdown"}.get(args.format, args.format)
+        if fmt == "json":
+            print(dump_json(diff_res))
+        elif fmt == "markdown":
+            print(format_diff_markdown(diff_res, impact=impact_res))
+        else:
+            print(format_diff_text(diff_res))
+
+        failed = (
+            (args.fail_on_new_cycles and len(diff_res["new_cycles"]) > 0)
+            or (args.fail_on_health_drop and diff_res["health_delta"] < 0)
+            or len(diff_res["new_rule_violations"]) > 0
+        )
+        return 2 if failed else 0
     if args.command == "mcp":
         return serve_mcp_stdio(target)
     if args.command == "serve":

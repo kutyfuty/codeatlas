@@ -1,0 +1,108 @@
+name: "CodeAtlas Architecture & Blast Radius"
+description: "Run CodeAtlas call-graph diff, PR blast-radius summary, and architectural CI gate with zero dependencies."
+author: "kutyfuty"
+
+branding:
+  icon: "git-branch"
+  color: "blue"
+
+inputs:
+  path:
+    description: "Repository path to analyze"
+    required: false
+    default: "."
+  base-ref:
+    description: "Base git ref for architectural diff and baseline gate (defaults to PR base branch or HEAD~1)"
+    required: false
+    default: ""
+  max-cycles:
+    description: "Maximum allowed circular dependencies (new cycles when baseline-only is true)"
+    required: false
+    default: "0"
+  min-health:
+    description: "Minimum required architectural health score (0-100)"
+    required: false
+    default: "0"
+  baseline-only:
+    description: "If true, ignore pre-existing tech debt and fail only on new regressions"
+    required: false
+    default: "true"
+  comment-on-pr:
+    description: "Post or update a deduplicated PR summary comment (requires pull-requests: write permission)"
+    required: false
+    default: "false"
+  python-version:
+    description: "Python version to install CodeAtlas with"
+    required: false
+    default: "3.12"
+  package-spec:
+    description: "PyPI package spec to install (e.g. codeatlas-viz or codeatlas-viz==0.4.0)"
+    required: false
+    default: "codeatlas-viz"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install CodeAtlas
+      shell: bash
+      run: python -m pip install --upgrade "${{ inputs.package-spec }}"
+
+    - name: Generate Architecture Diff & Blast Radius Report
+      shell: bash
+      env:
+        TARGET_PATH: ${{ inputs.path }}
+        INPUT_BASE: ${{ inputs.base-ref }}
+        PR_BASE: ${{ github.base_ref }}
+      run: |
+        BASE_REF="$INPUT_BASE"
+        if [ -z "$BASE_REF" ]; then
+          if [ -n "$PR_BASE" ]; then
+            git fetch --no-tags --depth=2 origin "$PR_BASE" || true
+            BASE_REF="origin/$PR_BASE"
+          else
+            BASE_REF="HEAD~1"
+          fi
+        fi
+        echo "CODEATLAS_BASE_REF=$BASE_REF" >> "$GITHUB_ENV"
+
+        if codeatlas diff "$TARGET_PATH" --base "$BASE_REF" --with-impact --format markdown > codeatlas-report.md 2>/dev/null; then
+          cat codeatlas-report.md >> "$GITHUB_STEP_SUMMARY"
+        else
+          codeatlas export "$TARGET_PATH" --format markdown -o codeatlas-report.md
+          cat codeatlas-report.md >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+    - name: Post or Update PR Comment
+      if: inputs.comment-on-pr == 'true' && github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        EXISTING_ID=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+          --jq '.[] | select(.body | contains("<!-- codeatlas-pr-comment -->")) | .id' | head -n 1 || true)
+        if [ -n "$EXISTING_ID" ]; then
+          gh api --method PATCH "repos/${{ github.repository }}/issues/comments/${EXISTING_ID}" \
+            -F body=@codeatlas-report.md >/dev/null
+        else
+          gh pr comment "$PR_NUMBER" --body-file codeatlas-report.md
+        fi
+
+    - name: Run Architectural Gate
+      shell: bash
+      env:
+        TARGET_PATH: ${{ inputs.path }}
+        MAX_CYCLES: ${{ inputs.max-cycles }}
+        MIN_HEALTH: ${{ inputs.min-health }}
+        BASELINE_ONLY: ${{ inputs.baseline-only }}
+      run: |
+        if [ "$BASELINE_ONLY" = "true" ] && [ -n "$CODEATLAS_BASE_REF" ]; then
+          codeatlas check "$TARGET_PATH" --baseline "$CODEATLAS_BASE_REF" --max-cycles "$MAX_CYCLES" --min-health "$MIN_HEALTH"
+        else
+          codeatlas check "$TARGET_PATH" --max-cycles "$MAX_CYCLES" --min-health "$MIN_HEALTH"
+        fi

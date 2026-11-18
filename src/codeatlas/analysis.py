@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import fnmatch
+import io
 import json
 import subprocess
+import tarfile
+import tempfile
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .models import CodeGraph, SymbolNode
+from .models import CallEdge, CodeGraph, FileSummary, SymbolNode
+from .scanner import scan_directory
 
 try:  # Python 3.11+
     import tomllib as _tomllib
@@ -606,3 +610,265 @@ def format_check_text(result: dict[str, Any]) -> str:
 
 def dump_json(payload: Any) -> str:
     return json.dumps(payload, indent=2)
+
+
+def load_graph_from_json(json_path: Path) -> CodeGraph:
+    """Reconstruct a CodeGraph from a previously exported CodeAtlas JSON snapshot."""
+    if not json_path.is_file():
+        raise FileNotFoundError(f"Baseline JSON not found: {json_path}")
+    try:
+        raw = json.loads(json_path.read_text(encoding="utf-8"))
+        nodes = [
+            SymbolNode(
+                id=n["id"],
+                name=n["name"],
+                kind=n["kind"],
+                file=n["file"],
+                language=n["language"],
+                start_line=int(n.get("start_line", 1)),
+                end_line=int(n.get("end_line", 1)),
+                docstring=str(n.get("docstring", "")),
+                parent=n.get("parent"),
+                fan_in=int(n.get("fan_in", 0)),
+                fan_out=int(n.get("fan_out", 0)),
+            )
+            for n in raw.get("nodes", [])
+        ]
+        edges = [
+            CallEdge(
+                source=e["source"],
+                target=e["target"],
+                call_count=int(e.get("call_count", 1)),
+            )
+            for e in raw.get("edges", [])
+        ]
+        file_edges = [
+            CallEdge(
+                source=e["source"],
+                target=e["target"],
+                call_count=int(e.get("call_count", 1)),
+            )
+            for e in raw.get("file_edges", [])
+        ]
+        files = [
+            FileSummary(
+                path=f["path"],
+                language=f["language"],
+                lines=int(f.get("lines", 0)),
+                symbol_count=int(f.get("symbol_count", 0)),
+            )
+            for f in raw.get("files", [])
+        ]
+        cycles = [list(c) for c in raw.get("cycles", [])]
+        return CodeGraph(
+            root=str(raw.get("root", str(json_path.parent))),
+            nodes=nodes,
+            edges=edges,
+            file_edges=file_edges,
+            files=files,
+            cycles=cycles,
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Invalid CodeAtlas JSON baseline {json_path}: {exc}") from exc
+
+
+def scan_git_ref(root: Path, git_ref: str) -> CodeGraph:
+    """Export a git ref via `git archive` into a temp directory and scan it without touching the worktree."""
+    target_dir = root if root.is_dir() else root.parent
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(target_dir), "archive", "--format=tar", git_ref, "--", "."],
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError(f"Failed to run git archive for '{git_ref}': {exc}") from exc
+
+    if proc.returncode != 0:
+        err_msg = proc.stderr.decode("utf-8", errors="replace").strip()
+        raise ValueError(f"Could not archive git ref '{git_ref}': {err_msg or 'unknown git error'}")
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp_root = Path(td).resolve()
+        with tarfile.open(fileobj=io.BytesIO(proc.stdout), mode="r:") as tf:
+            for member in tf.getmembers():
+                if not member.isfile():
+                    continue
+                dest = (tmp_root / member.name).resolve()
+                try:
+                    dest.relative_to(tmp_root)
+                except ValueError:
+                    continue
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                extracted = tf.extractfile(member)
+                if extracted is not None:
+                    dest.write_bytes(extracted.read())
+        return scan_directory(tmp_root)
+
+
+def compare_graphs(
+    base: CodeGraph,
+    head: CodeGraph,
+    *,
+    config: AtlasConfig | None = None,
+    base_label: str = "base",
+) -> dict[str, Any]:
+    """Compare two CodeGraphs to isolate newly introduced cycles, rule violations, and deltas."""
+    base_stats = base.stats()
+    head_stats = head.stats()
+
+    base_cycle_sets = {frozenset(c) for c in base.cycles}
+    head_cycle_sets = {frozenset(c) for c in head.cycles}
+    new_cycles = [c for c in head.cycles if frozenset(c) not in base_cycle_sets]
+    resolved_cycles = [c for c in base.cycles if frozenset(c) not in head_cycle_sets]
+
+    base_node_ids = {n.id for n in base.nodes}
+    head_node_ids = {n.id for n in head.nodes}
+    added_symbols = sorted(head_node_ids - base_node_ids)
+    removed_symbols = sorted(base_node_ids - head_node_ids)
+
+    base_edge_pairs = {(e.source, e.target) for e in base.edges}
+    head_edge_pairs = {(e.source, e.target) for e in head.edges}
+    added_edges = len(head_edge_pairs - base_edge_pairs)
+    removed_edges = len(base_edge_pairs - head_edge_pairs)
+
+    new_rule_violations: list[dict[str, Any]] = []
+    if config and config.rules:
+        base_chk = evaluate_check(base, AtlasConfig(max_cycles=10**9, min_health=0, rules=config.rules))
+        head_chk = evaluate_check(head, AtlasConfig(max_cycles=10**9, min_health=0, rules=config.rules))
+        base_rule_keys = {
+            (v.get("rule"), v.get("source"), v.get("target"))
+            for v in base_chk["violations"]
+            if v.get("kind") == "rule"
+        }
+        for v in head_chk["violations"]:
+            if v.get("kind") == "rule":
+                key = (v.get("rule"), v.get("source"), v.get("target"))
+                if key not in base_rule_keys:
+                    new_rule_violations.append(v)
+
+    return {
+        "base": base_label,
+        "base_stats": base_stats,
+        "head_stats": head_stats,
+        "health_delta": head_stats["health_score"] - base_stats["health_score"],
+        "new_cycles": new_cycles,
+        "resolved_cycles": resolved_cycles,
+        "new_rule_violations": new_rule_violations,
+        "added_symbols_count": len(added_symbols),
+        "removed_symbols_count": len(removed_symbols),
+        "added_symbols": added_symbols[:30],
+        "removed_symbols": removed_symbols[:30],
+        "added_edges_count": added_edges,
+        "removed_edges_count": removed_edges,
+    }
+
+
+def evaluate_baseline_check(
+    base: CodeGraph,
+    head: CodeGraph,
+    config: AtlasConfig,
+    base_label: str = "base",
+) -> dict[str, Any]:
+    """Fail only on newly introduced cycles, new boundary violations, or health regression."""
+    diff = compare_graphs(base, head, config=config, base_label=base_label)
+    violations: list[dict[str, Any]] = []
+
+    if len(diff["new_cycles"]) > config.max_cycles:
+        for idx, cyc in enumerate(diff["new_cycles"], start=1):
+            chain = " -> ".join(c.split("::")[-1] for c in cyc[:6])
+            violations.append({
+                "kind": "new_cycle",
+                "severity": "error",
+                "message": f"New circular dependency #{idx} ({len(cyc)} symbols): {chain}",
+                "symbols": cyc,
+            })
+
+    violations.extend(diff["new_rule_violations"])
+
+    head_health = diff["head_stats"]["health_score"]
+    if config.min_health > 0 and head_health < config.min_health and diff["health_delta"] < 0:
+        violations.append({
+            "kind": "health_regression",
+            "severity": "error",
+            "message": (
+                f"Health score regressed by {diff['health_delta']} to {head_health}/100 "
+                f"(below minimum {config.min_health}/100)"
+            ),
+        })
+
+    return {
+        "passed": len(violations) == 0,
+        "mode": "baseline",
+        "base": base_label,
+        "violation_count": len(violations),
+        "violations": violations,
+        "stats": diff["head_stats"],
+        "diff": diff,
+    }
+
+
+def format_diff_text(diff: dict[str, Any]) -> str:
+    """Format architectural diff cleanly for terminal output."""
+    bs = diff["base_stats"]
+    hs = diff["head_stats"]
+    delta = diff["health_delta"]
+    sign = "+" if delta > 0 else ""
+    lines = [
+        f"CodeAtlas Architecture Diff (vs {diff['base']})",
+        "-" * 60,
+        (
+            f"Health: {bs['health_score']} -> {hs['health_score']}/100 ({sign}{delta})  |  "
+            f"Symbols: +{diff['added_symbols_count']} / -{diff['removed_symbols_count']}  |  "
+            f"Edges: +{diff['added_edges_count']} / -{diff['removed_edges_count']}"
+        ),
+        (
+            f"New Cycles: {len(diff['new_cycles'])}  |  Resolved Cycles: {len(diff['resolved_cycles'])}  |  "
+            f"New Rule Violations: {len(diff['new_rule_violations'])}"
+        ),
+    ]
+    if diff["new_cycles"]:
+        lines.append("\nNew Circular Dependencies:")
+        for idx, cyc in enumerate(diff["new_cycles"], start=1):
+            chain = " <-> ".join(c.split("::")[-1] for c in cyc[:6])
+            lines.append(f"  [x] #{idx}: {chain}")
+    if diff["new_rule_violations"]:
+        lines.append("\nNew Boundary Rule Violations:")
+        for v in diff["new_rule_violations"]:
+            lines.append(f"  [x] {v['message']}")
+    return "\n".join(lines)
+
+
+def format_diff_markdown(diff: dict[str, Any], impact: dict[str, Any] | None = None) -> str:
+    """Format a ready-to-post GitHub PR comment summarizing architectural diff and blast radius."""
+    bs = diff["base_stats"]
+    hs = diff["head_stats"]
+    delta = diff["health_delta"]
+    sign = "+" if delta > 0 else ""
+    lines = [
+        "<!-- codeatlas-pr-comment -->",
+        "## CodeAtlas Architecture Report",
+        "",
+        f"Compared against `{diff['base']}`:",
+        "",
+        "| Metric | Base | Head | Delta |",
+        "|---|---:|---:|---:|",
+        f"| **Health Score** | {bs['health_score']}/100 | {hs['health_score']}/100 | `{sign}{delta}` |",
+        f"| **Files** | {bs['total_files']} | {hs['total_files']} | `{hs['total_files'] - bs['total_files']:+d}` |",
+        f"| **Symbols** | {bs['total_symbols']} | {hs['total_symbols']} | `+{diff['added_symbols_count']} / -{diff['removed_symbols_count']}` |",
+        f"| **Call Edges** | {bs['total_edges']} | {hs['total_edges']} | `+{diff['added_edges_count']} / -{diff['removed_edges_count']}` |",
+        f"| **Cycles** | {bs['cycle_count']} | {hs['cycle_count']} | `+{len(diff['new_cycles'])} / -{len(diff['resolved_cycles'])}` |",
+    ]
+    if diff["new_cycles"]:
+        lines.extend(["", "### New Circular Dependencies"])
+        for idx, cyc in enumerate(diff["new_cycles"][:10], start=1):
+            chain = " ↔ ".join(f"`{c.split('::')[-1]}`" for c in cyc[:6])
+            lines.append(f"{idx}. {chain}")
+    if diff["new_rule_violations"]:
+        lines.extend(["", "### New Architectural Rule Violations"])
+        for v in diff["new_rule_violations"][:15]:
+            lines.append(f"- {v['message']}")
+    if impact:
+        lines.extend(["", format_impact_markdown(impact)])
+    return "\n".join(lines)

@@ -164,7 +164,38 @@ def _resolve_target(
     by_name: dict[str, list[SymbolNode]],
     file_meta: dict[str, tuple[str, str, set[str]]],
 ) -> SymbolNode | None:
-    """Resolve a raw callee name to the most likely SymbolNode."""
+    """Resolve a raw or class-qualified (`Owner.method`) callee name to a SymbolNode."""
+    if "." in callee_name:
+        owner, meth = callee_name.rsplit(".", 1)
+        owner_matches = [c for c in by_name.get(meth, ()) if c.parent == owner]
+        if owner_matches:
+            for c in owner_matches:
+                if c.file == caller_file:
+                    return c
+            if caller_import_paths:
+                best_score = 0
+                best_candidate: SymbolNode | None = None
+                for c in owner_matches:
+                    stem, parent_dir, c_parts = file_meta[c.file]
+                    for parts in caller_import_paths:
+                        if not parts:
+                            continue
+                        if stem in parts:
+                            score = sum(1 for p in parts if p in c_parts) + 1
+                            if score > best_score:
+                                best_score = score
+                                best_candidate = c
+                        elif parent_dir and parent_dir == parts[-1]:
+                            score = sum(1 for p in parts if p in c_parts)
+                            if score > best_score:
+                                best_score = score
+                                best_candidate = c
+                if best_candidate is not None:
+                    return best_candidate
+            if len(owner_matches) == 1:
+                return owner_matches[0]
+        callee_name = meth
+
     # 1. Same-file symbol (prefer same-class method if caller is inside a class)
     local_matches = by_file_and_name.get((caller_file, callee_name))
     if local_matches:
@@ -292,10 +323,39 @@ def scan_directory(root_path: str | Path, extra_ignores: list[str] | None = None
     resolve_cache: dict[tuple[str, str | None, str], SymbolNode | None] = {}
     for rel_posix, parsed in parsed_files:
         import_paths = _build_import_paths(parsed.imports)
+        consumed_per_caller: dict[str, Counter[str]] = defaultdict(Counter)
+        for caller_id, qcallees in parsed.qualified_calls.items():
+            caller_node = node_map.get(caller_id)
+            caller_parent = caller_node.parent if caller_node else None
+            for raw_owner, raw_meth in qcallees:
+                resolved_owner = parsed.aliases.get(raw_owner, raw_owner)
+                callee_name = f"{resolved_owner}.{raw_meth}"
+                cache_key = (rel_posix, caller_parent, callee_name)
+                if cache_key in resolve_cache:
+                    target = resolve_cache[cache_key]
+                else:
+                    target = _resolve_target(
+                        callee_name,
+                        caller_node,
+                        rel_posix,
+                        import_paths,
+                        by_file_and_name,
+                        by_name,
+                        file_meta,
+                    )
+                    resolve_cache[cache_key] = target
+                consumed_per_caller[caller_id][raw_meth] += 1
+                if target and target.id != caller_id:
+                    edge_counts[(caller_id, target.id)] += 1
+
         for caller_id, callees in parsed.raw_calls.items():
             caller_node = node_map.get(caller_id)
             caller_parent = caller_node.parent if caller_node else None
+            skip_counts = consumed_per_caller.get(caller_id)
             for raw_callee in callees:
+                if skip_counts and skip_counts[raw_callee] > 0:
+                    skip_counts[raw_callee] -= 1
+                    continue
                 if (rel_posix, raw_callee) in by_file_and_name:
                     callee_name = raw_callee
                 else:

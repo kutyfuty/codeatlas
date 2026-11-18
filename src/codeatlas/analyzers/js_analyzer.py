@@ -12,7 +12,7 @@ _KEYWORDS = frozenset({
     "if", "else", "for", "while", "do", "switch", "case", "catch", "finally",
     "try", "return", "throw", "typeof", "instanceof", "new", "delete", "void",
     "await", "yield", "import", "export", "from", "class", "function", "super",
-    "this", "constructor", "get", "set", "static", "async",
+    "this", "constructor", "static", "async",
 })
 
 _SVELTE_SCRIPT_RE = re.compile(
@@ -37,7 +37,9 @@ _CLASS_ARROW_PROP_RE = re.compile(
     r"""(?:^|[\n;{}])\s*(?:(?:public|private|protected|static|override|readonly)\s+)*([A-Za-z_$][\w$]*)\s*(?::\s*[^=]+)?=\s*(?:async\s+)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*(?::\s*[^=]+)?=>\s*\{""",
 )
 _CALL_RE = re.compile(r"""(?<![.\w$])([A-Za-z_$][\w$]*)\s*\(""")
-_METHOD_CALL_RE = re.compile(r"""\.([A-Za-z_$][\w$]*)\s*\(""")
+_OBJ_METHOD_CALL_RE = re.compile(r"""(?<![.\w$])([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\s*\(""")
+_NEW_VAR_RE = re.compile(r"""(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*new\s+([A-Za-z_$][\w$]*)\s*\(""")
+_TS_TYPE_BIND_RE = re.compile(r"""(?<![.\w$])([A-Za-z_$][\w$]*)\s*:\s*([A-Z][A-Za-z0-9_$]*)""")
 
 
 def _extract_svelte_scripts(source: str) -> str:
@@ -95,18 +97,37 @@ def _line_at(newlines: list[int], idx: int) -> int:
     return bisect.bisect_left(newlines, idx) + 1
 
 
-def _extract_calls(body: str) -> list[str]:
+def _extract_calls(
+    body: str, header: str = "", class_name: str | None = None
+) -> tuple[list[str], list[tuple[str, str]]]:
+    local_types: dict[str, str] = {}
+    for var, cls_name in _TS_TYPE_BIND_RE.findall(header):
+        local_types[var] = cls_name
+    for var, cls_name in _NEW_VAR_RE.findall(body):
+        local_types[var] = cls_name
+    for var, cls_name in _TS_TYPE_BIND_RE.findall(body):
+        local_types.setdefault(var, cls_name)
+
     calls = [
         m.group(1)
         for m in _CALL_RE.finditer(body)
         if m.group(1) not in _KEYWORDS
     ]
-    calls.extend(
-        m.group(1)
-        for m in _METHOD_CALL_RE.finditer(body)
-        if m.group(1) not in _KEYWORDS
-    )
-    return calls
+    qualified: list[tuple[str, str]] = []
+    for m in _OBJ_METHOD_CALL_RE.finditer(body):
+        obj, meth = m.group(1), m.group(2)
+        if meth in _KEYWORDS:
+            continue
+        if obj == "this":
+            calls.append(meth)
+            continue
+        owner = local_types.get(obj)
+        if not owner and obj and obj[0].isupper():
+            owner = obj
+        if owner:
+            qualified.append((owner, meth))
+        calls.append(meth)
+    return calls, qualified
 
 
 def analyze_js(source: str, rel_path: str, language: str = "javascript") -> ParsedFile:
@@ -174,6 +195,7 @@ def analyze_js(source: str, rel_path: str, language: str = "javascript") -> Pars
 
     symbols: list[SymbolNode] = []
     raw_calls: dict[str, list[str]] = {}
+    qualified_calls: dict[str, list[tuple[str, str]]] = {}
     seen_ids: set[str] = set()
 
     for decl_start, open_brace, close_idx, name, kind in raw_spans:
@@ -200,8 +222,22 @@ def analyze_js(source: str, rel_path: str, language: str = "javascript") -> Pars
             )
         )
         if kind != "class":
-            raw_calls[sym_id] = _extract_calls(clean[open_brace + 1 : close_idx])
+            class_parent = parent if (scope_stack and scope_stack[-1][2] == "class") else None
+            rcalls, qcalls = _extract_calls(
+                clean[open_brace + 1 : close_idx],
+                header=clean[decl_start:open_brace],
+                class_name=class_parent,
+            )
+            raw_calls[sym_id] = rcalls
+            if qcalls:
+                qualified_calls[sym_id] = qcalls
 
         scope_stack.append((close_idx, name, kind))
 
-    return ParsedFile(symbols=symbols, raw_calls=raw_calls, imports=imports, aliases=aliases)
+    return ParsedFile(
+        symbols=symbols,
+        raw_calls=raw_calls,
+        qualified_calls=qualified_calls,
+        imports=imports,
+        aliases=aliases,
+    )

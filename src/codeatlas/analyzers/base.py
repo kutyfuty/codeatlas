@@ -14,6 +14,8 @@ class ParsedFile:
     symbols: list[SymbolNode] = field(default_factory=list)
     # Maps caller symbol ID -> list of raw callee names referenced inside it.
     raw_calls: dict[str, list[str]] = field(default_factory=dict)
+    # Maps caller symbol ID -> list of (receiver_class_name, method_name) pairs from type hints/constructors.
+    qualified_calls: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
     # Imported module/file hints to help disambiguate cross-file calls.
     imports: list[str] = field(default_factory=list)
     # Maps local alias -> original imported symbol name (e.g. "vt" -> "verify_token").

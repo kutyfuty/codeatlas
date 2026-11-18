@@ -1,4 +1,4 @@
-"""Python AST analyzer for extracting symbols and call relationships."""
+"""Python AST analyzer for extracting symbols, local type hints, and call relationships."""
 
 from __future__ import annotations
 
@@ -17,6 +17,29 @@ def _call_name(node: ast.expr) -> str | None:
     return None
 
 
+def _annotation_type_name(ann: ast.expr | None) -> str | None:
+    """Extract a simple class/type name from a Python type annotation expression."""
+    if ann is None:
+        return None
+    if isinstance(ann, ast.Name):
+        return None if ann.id == "None" else ann.id
+    if isinstance(ann, ast.Attribute):
+        return ann.attr
+    if isinstance(ann, ast.Constant) and isinstance(ann.value, str):
+        cleaned = ann.value.strip().split("[", 1)[0].split(".")[-1]
+        return cleaned if cleaned.isidentifier() and cleaned != "None" else None
+    if isinstance(ann, ast.Subscript):
+        base = _annotation_type_name(ann.value)
+        if base in {"Optional", "Annotated", "ClassVar", "Final"}:
+            if isinstance(ann.slice, ast.Tuple) and ann.slice.elts:
+                return _annotation_type_name(ann.slice.elts[0])
+            return _annotation_type_name(ann.slice)
+        return base
+    if isinstance(ann, ast.BinOp) and isinstance(ann.op, ast.BitOr):
+        return _annotation_type_name(ann.left) or _annotation_type_name(ann.right)
+    return None
+
+
 def analyze_python(source: str, rel_path: str) -> ParsedFile:
     """Parse Python source code iteratively into symbols and call references."""
     try:
@@ -26,11 +49,13 @@ def analyze_python(source: str, rel_path: str) -> ParsedFile:
 
     symbols: list[SymbolNode] = []
     raw_calls: dict[str, list[str]] = {}
+    qualified_calls: dict[str, list[tuple[str, str]]] = {}
     imports: list[str] = []
     aliases: dict[str, str] = {}
     class_stack: list[str] = []
     scope_names: list[str] = []
     func_stack: list[str] = []
+    var_types_stack: list[dict[str, str]] = []
 
     # Stack items: (action, payload) where action 0 = enter node, 1 = exit class, 2 = exit func
     stack: list[tuple[int, ast.AST | None]] = [(0, tree)]
@@ -43,15 +68,46 @@ def analyze_python(source: str, rel_path: str) -> ParsedFile:
         if action == 2:
             func_stack.pop()
             scope_names.pop()
+            var_types_stack.pop()
             continue
 
         assert node is not None
         t = type(node)
         if t is ast.Call:
             if func_stack:
-                callee = _call_name(node.func)  # type: ignore[attr-defined]
-                if callee:
-                    raw_calls[func_stack[-1]].append(callee)
+                func_expr = node.func  # type: ignore[attr-defined]
+                if isinstance(func_expr, ast.Attribute) and isinstance(func_expr.value, ast.Name):
+                    obj = func_expr.value.id
+                    meth = func_expr.attr
+                    if obj in {"self", "cls"}:
+                        raw_calls[func_stack[-1]].append(meth)
+                    else:
+                        owner = var_types_stack[-1].get(obj) if var_types_stack else None
+                        if not owner and obj and obj[0].isupper():
+                            owner = obj
+                        if owner:
+                            qualified_calls.setdefault(func_stack[-1], []).append((owner, meth))
+                        raw_calls[func_stack[-1]].append(meth)
+                else:
+                    callee = _call_name(func_expr)
+                    if callee:
+                        raw_calls[func_stack[-1]].append(callee)
+        elif t is ast.Assign:
+            if var_types_stack:
+                val = node.value  # type: ignore[attr-defined]
+                if isinstance(val, ast.Call):
+                    ctor = _call_name(val.func)
+                    if ctor and ctor[0].isupper():
+                        for tgt in node.targets:  # type: ignore[attr-defined]
+                            if isinstance(tgt, ast.Name):
+                                var_types_stack[-1][tgt.id] = ctor
+        elif t is ast.AnnAssign:
+            if var_types_stack:
+                tgt = node.target  # type: ignore[attr-defined]
+                if isinstance(tgt, ast.Name):
+                    tname = _annotation_type_name(node.annotation)  # type: ignore[attr-defined]
+                    if tname:
+                        var_types_stack[-1][tgt.id] = tname
         elif t is ast.Import:
             for alias in node.names:  # type: ignore[attr-defined]
                 imports.append(alias.name)
@@ -115,6 +171,16 @@ def analyze_python(source: str, rel_path: str) -> ParsedFile:
             )
             raw_calls.setdefault(sym_id, [])
             func_stack.append(sym_id)
+            vt: dict[str, str] = {}
+            if class_stack:
+                vt["self"] = class_stack[-1]
+                vt["cls"] = class_stack[-1]
+            args_obj = node.args  # type: ignore[attr-defined]
+            for arg in (*args_obj.posonlyargs, *args_obj.args, *args_obj.kwonlyargs):
+                tname = _annotation_type_name(arg.annotation)
+                if tname:
+                    vt[arg.arg] = tname
+            var_types_stack.append(vt)
             stack.append((2, None))
 
         children = list(ast.iter_child_nodes(node))
@@ -124,6 +190,7 @@ def analyze_python(source: str, rel_path: str) -> ParsedFile:
     return ParsedFile(
         symbols=symbols,
         raw_calls=raw_calls,
+        qualified_calls=qualified_calls,
         imports=imports,
         aliases=aliases,
     )
