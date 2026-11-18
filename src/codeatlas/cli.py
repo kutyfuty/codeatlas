@@ -51,6 +51,8 @@ def _handle_export(root: Path, fmt: str, output: str | None) -> int:
         rendered = graph.to_mermaid()
     elif fmt == "html":
         rendered = graph.to_html()
+    elif fmt == "markdown":
+        rendered = graph.to_markdown()
     else:
         rendered = json.dumps(graph.to_dict(), indent=2)
 
@@ -82,7 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_export = sub.add_parser("export", help="Export the call graph as JSON or Mermaid.")
     p_export.add_argument("path", nargs="?", default=".", help="Target repository path (default: .)")
-    p_export.add_argument("--format", choices=("json", "mermaid", "html"), default="json", help="Output format")
+    p_export.add_argument("--format", choices=("json", "mermaid", "html", "markdown"), default="json", help="Output format")
     p_export.add_argument("-o", "--output", default=None, help="Output file path (prints to stdout if omitted)")
 
     return parser

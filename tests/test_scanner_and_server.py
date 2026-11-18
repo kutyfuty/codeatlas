@@ -174,6 +174,12 @@ def test_cli_scan_and_export(tmp_path: Path, capsys) -> None:
     assert "Circular Dependencies" in html_text
     assert "Unreferenced Symbols" in html_text
 
+    md_file = tmp_path / "summary.md"
+    assert main(["export", str(repo), "--format", "markdown", "-o", str(md_file)]) == 0
+    md_text = md_file.read_text(encoding="utf-8")
+    assert "## CodeAtlas Architecture Summary" in md_text
+    assert "```mermaid" in md_text
+
 
 def test_scanner_single_file_and_go_package_import(tmp_path: Path) -> None:
     single = tmp_path / "solo.py"

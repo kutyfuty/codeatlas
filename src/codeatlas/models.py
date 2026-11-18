@@ -138,6 +138,36 @@ class CodeGraph:
             lines.append('    empty["No call edges detected"]')
         return "\n".join(lines)
 
+    def to_markdown(self, max_hubs: int = 8) -> str:
+        """Render a concise GitHub-flavored Markdown architectural report."""
+        st = self.stats()
+        lines = [
+            "## CodeAtlas Architecture Summary",
+            "",
+            f"- **Files:** {st['total_files']} | **Symbols:** {st['total_symbols']} | "
+            f"**Call Edges:** {st['total_edges']} | **Cycles:** {st['cycle_count']} | "
+            f"**Health Score:** `{st['health_score']}/100`",
+        ]
+        if st["languages"]:
+            langs = ", ".join(f"{k} ({v})" for k, v in sorted(st["languages"].items()))
+            lines.append(f"- **Languages:** {langs}")
+
+        if st["hotspots"]:
+            lines.extend(["", "### Top Call-Graph Hubs", "", "| Symbol | File | Fan-In | Fan-Out |", "|---|---|---|---|"])
+            for hub in st["hotspots"][:max_hubs]:
+                lines.append(
+                    f"| `{hub['name']}` | `{hub['file']}` | {hub['fan_in']} | {hub['fan_out']} |"
+                )
+
+        if self.cycles:
+            lines.extend(["", "### Circular Call Groups"])
+            for idx, cyc in enumerate(self.cycles[:5], start=1):
+                chain = " ↔ ".join(f"`{c.split('::')[-1]}`" for c in cyc[:6])
+                lines.append(f"{idx}. {chain}")
+
+        lines.extend(["", "<details><summary>Mermaid Call Graph</summary>", "", "```mermaid", self.to_mermaid(), "```", "", "</details>"])
+        return "\n".join(lines)
+
     def to_html(self) -> str:
         """Render a self-contained single-file HTML architecture report."""
         import html

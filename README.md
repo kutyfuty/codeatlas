@@ -89,6 +89,9 @@ codeatlas serve /path/to/repo --port 4173 --no-open
 # Export as self-contained single-file HTML report
 codeatlas export . --format html -o report.html
 
+# Export as GitHub-flavored Markdown summary (great for PR comments / CI)
+codeatlas export . --format markdown -o SUMMARY.md
+
 # Export as Mermaid flowchart
 codeatlas export . --format mermaid -o architecture.mmd
 
