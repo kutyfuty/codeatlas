@@ -1,6 +1,12 @@
 # CodeAtlas
 
-**Zero-config local codebase architecture & call-graph visualizer.**
+[![CI](https://github.com/kutyfuty/codeatlas/actions/workflows/ci.yml/badge.svg)](https://github.com/kutyfuty/codeatlas/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/codeatlas-viz)](https://pypi.org/project/codeatlas-viz/)
+[![Python](https://img.shields.io/pypi/pyversions/codeatlas-viz)](https://pypi.org/project/codeatlas-viz/)
+[![Zero Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+**Zero-config local codebase architecture, call-graph, blast-radius & MCP tool.**
 
 Inspect functions, classes, call-graph hubs, unreferenced ("dead") code, circular dependencies, and shortest call paths in your terminal or browser—with zero cloud uploads, zero configuration files, and zero runtime dependencies for the CLI.
 
