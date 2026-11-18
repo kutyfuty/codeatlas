@@ -1,5 +1,6 @@
-"""Unit tests for Python, JavaScript, TypeScript, and Svelte analyzers."""
+"""Unit tests for Python, JavaScript, TypeScript, Svelte, Go, Rust, Java, and C++ analyzers."""
 
+from codeatlas.analyzers.c_family_analyzer import analyze_c_family
 from codeatlas.analyzers.js_analyzer import analyze_js
 from codeatlas.analyzers.python_analyzer import analyze_python
 
@@ -184,3 +185,61 @@ def test_svelte_analyzer_preserves_line_numbers() -> None:
     assert sym.language == "svelte"
     assert sym.start_line == 4
     assert "loadGraph" in parsed.raw_calls["App.svelte::handleClick"]
+
+
+def test_go_and_rust_analyzers() -> None:
+    go_src = '''
+package main
+import "fmt"
+
+func (s *Server) Start() error {
+    return s.listen()
+}
+
+func (s *Server) listen() error {
+    return nil
+}
+'''
+    go_parsed = analyze_c_family(go_src, "server.go", "go")
+    go_ids = {s.id: s for s in go_parsed.symbols}
+    assert "server.go::Server.Start" in go_ids
+    assert go_ids["server.go::Server.Start"].kind == "method"
+    assert "listen" in go_parsed.raw_calls["server.go::Server.Start"]
+
+    rust_src = '''
+use crate::engine::Runner;
+
+pub struct Engine {}
+
+impl Engine {
+    pub fn execute(&self) {
+        self.prepare();
+    }
+    fn prepare(&self) {}
+}
+'''
+    rs_parsed = analyze_c_family(rust_src, "lib.rs", "rust")
+    rs_ids = {s.id: s for s in rs_parsed.symbols}
+    assert "lib.rs::Engine" in rs_ids
+    assert "lib.rs::Engine.execute" in rs_ids
+    assert "prepare" in rs_parsed.raw_calls["lib.rs::Engine.execute"]
+
+
+def test_java_and_cpp_analyzers() -> None:
+    java_src = '''
+import com.example.Auth;
+
+public class OrderService {
+    public boolean processOrder(int id) {
+        return validateOrder(id);
+    }
+    private boolean validateOrder(int id) {
+        return true;
+    }
+}
+'''
+    j_parsed = analyze_c_family(java_src, "OrderService.java", "java")
+    j_ids = {s.id: s for s in j_parsed.symbols}
+    assert "OrderService.java::OrderService" in j_ids
+    assert "OrderService.java::OrderService.processOrder" in j_ids
+    assert "validateOrder" in j_parsed.raw_calls["OrderService.java::OrderService.processOrder"]

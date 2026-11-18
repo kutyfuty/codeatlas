@@ -9,9 +9,13 @@ Inspect functions, classes, call-graph hubs, unreferenced ("dead") code, circula
 ## Key Features
 
 - **Zero Runtime Dependencies:** Pure Python standard-library CLI (`pip` / `pipx` ready).
-- **Multi-Language Analysis:**
+- **Multi-Language Analysis (9 Languages):**
   - **Python:** Full `ast` parsing for classes, methods, nested functions, docstrings, relative imports, and import aliases.
   - **JavaScript / TypeScript / Svelte:** Structural analysis of functions, arrow functions, ES6 classes, methods, getters/setters, class arrow properties, and `<script>` blocks.
+  - **Go / Rust / Java / C / C++:** Structural parsing of structs, traits/impl blocks, receiver methods, classes, and member call sites.
+- **Architectural Health Score & Standalone HTML Report:**
+  - Computes a `0–100` repository health score based on circular dependency and dead-code ratios.
+  - Export self-contained single-file `.html` architecture reports (`codeatlas export . --format html -o report.html`).
 - **Interactive Svelte 5 Web UI (`codeatlas serve`):**
   - Switch between **Symbol-Level** and **File-Level** dependency graphs.
   - **Hubs, Circular Dependencies (`Cycles`), and Unreferenced (`Dead`)** tabs.
@@ -65,6 +69,9 @@ codeatlas serve /path/to/repo --port 4173 --no-open
 ### 3. Export Graph (`export`)
 
 ```bash
+# Export as self-contained single-file HTML report
+codeatlas export . --format html -o report.html
+
 # Export as Mermaid flowchart
 codeatlas export . --format mermaid -o architecture.mmd
 

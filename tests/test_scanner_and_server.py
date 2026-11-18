@@ -164,6 +164,13 @@ def test_cli_scan_and_export(tmp_path: Path, capsys) -> None:
     assert main(["export", str(repo), "--format", "json", "-o", str(out_file)]) == 0
     exported = json.loads(out_file.read_text(encoding="utf-8"))
     assert exported["stats"]["total_files"] == 2
+    assert "health_score" in exported["stats"]
+
+    html_file = tmp_path / "report.html"
+    assert main(["export", str(repo), "--format", "html", "-o", str(html_file)]) == 0
+    html_text = html_file.read_text(encoding="utf-8")
+    assert "CodeAtlas Architecture Report" in html_text
+    assert "Health:" in html_text
 
 
 def test_server_api_graph_and_file_security(tmp_path: Path) -> None:

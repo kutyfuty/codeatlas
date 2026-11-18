@@ -35,6 +35,11 @@
     javascript: '#eab308',
     typescript: '#06b6d4',
     svelte: '#f97316',
+    go: '#14b8a6',
+    rust: '#ef4444',
+    java: '#a855f7',
+    c: '#64748b',
+    cpp: '#ec4899',
   };
 
   async function loadGraph(rescan = false) {
@@ -443,6 +448,9 @@
         {#if graph.stats.cycle_count > 0}
           <span class="warn">{graph.stats.cycle_count} cycles</span>
         {/if}
+        {#if graph.stats.health_score !== undefined}
+          <span class="health">Health {graph.stats.health_score}/100</span>
+        {/if}
       </div>
     {/if}
 
@@ -466,6 +474,11 @@
         <option value="javascript">JavaScript</option>
         <option value="typescript">TypeScript</option>
         <option value="svelte">Svelte</option>
+        <option value="go">Go</option>
+        <option value="rust">Rust</option>
+        <option value="java">Java</option>
+        <option value="c">C</option>
+        <option value="cpp">C++</option>
       </select>
       <label class="toggle">
         <input type="checkbox" bind:checked={focusOnly} disabled={!selectedId} />
@@ -866,6 +879,11 @@
   .stats .warn {
     background: #7c2d12;
     color: #fed7aa;
+  }
+
+  .stats .health {
+    background: #14532d;
+    color: #bbf7d0;
   }
 
   .controls {
