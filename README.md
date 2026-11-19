@@ -3,21 +3,21 @@
 [![CI](https://github.com/kutyfuty/codeatlas/actions/workflows/ci.yml/badge.svg)](https://github.com/kutyfuty/codeatlas/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/codeatlas-viz)](https://pypi.org/project/codeatlas-viz/)
 [![Python](https://img.shields.io/pypi/pyversions/codeatlas-viz)](https://pypi.org/project/codeatlas-viz/)
-[![Zero Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](pyproject.toml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Zero Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](https://github.com/kutyfuty/codeatlas/blob/main/pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/kutyfuty/codeatlas/blob/main/LICENSE)
 
 **Zero-config local codebase architecture, call-graph, blast-radius & MCP tool.**
 
 Inspect functions, classes, call-graph hubs, unreferenced ("dead") code, circular dependencies, and shortest call paths in your terminal or browser—with zero cloud uploads, zero configuration files, and zero runtime dependencies for the CLI.
 
-![CodeAtlas interactive Svelte call-graph demo](docs/demo.gif)
+![CodeAtlas interactive Svelte call-graph demo](https://raw.githubusercontent.com/kutyfuty/codeatlas/main/docs/demo.gif)
 
 <details>
 <summary>More screenshots (Overview, Focus 1-hop, File-level Graph)</summary>
 
 | Symbol Graph & Path Finder | Focus 1-Hop Isolation | File Dependency Map |
 |---|---|---|
-| ![CodeAtlas Symbol Graph](docs/demo-ui.png) | ![CodeAtlas Focus 1-Hop](docs/demo-focus.png) | ![CodeAtlas File Graph](docs/demo-files.png) |
+| ![CodeAtlas Symbol Graph](https://raw.githubusercontent.com/kutyfuty/codeatlas/main/docs/demo-ui.png) | ![CodeAtlas Focus 1-Hop](https://raw.githubusercontent.com/kutyfuty/codeatlas/main/docs/demo-focus.png) | ![CodeAtlas File Graph](https://raw.githubusercontent.com/kutyfuty/codeatlas/main/docs/demo-files.png) |
 
 </details>
 
@@ -203,4 +203,4 @@ npm run build
 
 ## License
 
-[MIT](LICENSE)
+[MIT](https://github.com/kutyfuty/codeatlas/blob/main/LICENSE)
